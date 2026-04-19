@@ -115,7 +115,7 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <h1>Lobbying Influence Explorer</h1>
+        <h1>LobbyWatch</h1>
       </header>
       <SearchBar onSearch={onSearch} results={results} onSelect={onSelectResult} />
       <FilterBar onChange={onFilterApply} issueCodes={issueCodes} />

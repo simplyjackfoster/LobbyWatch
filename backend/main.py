@@ -10,7 +10,7 @@ from graph import get_entity_summary, get_issue_graph, get_legislator_graph, get
 from models import SessionLocal
 from search import search_entities
 
-app = FastAPI(title="Lobbying Influence Explorer API", version="0.1.0")
+app = FastAPI(title="LobbyWatch API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
