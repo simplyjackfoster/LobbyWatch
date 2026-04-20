@@ -21,80 +21,109 @@ function resolveEntity(node) {
 }
 
 function resolveType(node) {
-  if (!node) return 'Organization'
+  if (!node) return 'Entity'
   if (node.type === 'organization') return 'Organization'
   if (node.type === 'legislator') return 'Legislator'
   if (node.type === 'committee') return 'Committee'
   if (node.type === 'lobbyist') return 'Lobbyist'
-  return 'Organization'
+  return 'Entity'
 }
 
-function buildStats(type, summary, yearRangeLabel) {
-  if (!summary) {
-    return [
-      { label: 'TOTAL LOBBYING SPEND', value: '$0', money: true },
-      { label: 'LEGISLATORS FUNDED', value: '0' },
-      { label: `FILINGS (${yearRangeLabel})`, value: '0' },
-      { label: 'TOP ISSUES', value: 'N/A' },
-    ]
-  }
-
-  if (type === 'Legislator') {
-    return [
-      { label: 'TOTAL CONTRIBUTIONS RECEIVED', value: formatCurrency(summary.total_contributions_received), money: true },
-      { label: 'COMMITTEE ASSIGNMENTS', value: formatCount(summary.committees?.length || 0) },
-      { label: `FILINGS (${yearRangeLabel})`, value: formatCount(summary.top_contributing_orgs?.length || 0) },
-      { label: 'TOP ISSUES', value: (summary.top_issue_codes || []).join(' · ') || 'N/A' },
-    ]
-  }
-
-  if (type === 'Committee') {
-    return [
-      { label: 'ACTIVE MEMBERS', value: formatCount(summary.member_count) },
-      { label: 'ACTIVE LOBBYING ORGS', value: formatCount(summary.active_lobbying_orgs) },
-      { label: `FILINGS (${yearRangeLabel})`, value: formatCount(summary.members?.length || 0) },
-      { label: 'TOP ISSUES', value: (summary.top_issue_codes || []).join(' · ') || 'N/A' },
-    ]
-  }
-
-  return [
-    { label: 'TOTAL LOBBYING SPEND', value: formatCurrency(summary.total_lobbying_spend), money: true },
-    { label: 'LEGISLATORS FUNDED', value: formatCount(summary.top_recipient_legislators?.length || 0) },
-    { label: `FILINGS (${yearRangeLabel})`, value: formatCount(summary.filing_count) },
-    { label: 'TOP ISSUES', value: (summary.top_issue_codes || []).join(' · ') || 'N/A' },
-  ]
+function getNodeById(graph, id) {
+  return (graph?.nodes || []).find((n) => n.id === id) || null
 }
 
-function buildConnections(type, summary) {
-  if (!summary) return []
+function buildGraphDrivenPanel(node, graph, summary) {
+  if (!node) return { stats: [], connections: [] }
+  const allEdges = graph?.edges || []
 
-  if (type === 'Committee') {
-    return (summary.members || []).slice(0, 3).map((member) => ({
-      name: member.name,
-      detail: `${member.role || 'Member'} · ${member.party || 'Nonpartisan'}`,
-    }))
+  if (node.type === 'organization') {
+    const contributionEdges = allEdges
+      .filter((e) => e.type === 'contribution' && e.source === node.id)
+      .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0))
+    const connectedLegislatorIds = new Set(
+      contributionEdges
+        .map((e) => e.target)
+        .filter((id) => getNodeById(graph, id)?.type === 'legislator')
+    )
+    const hiredFirmCount = allEdges.filter((e) => e.type === 'hired_firm' && e.source === node.id).length
+    return {
+      stats: [
+        { label: 'TOTAL LOBBYING SPEND', value: formatCurrency(summary?.total_lobbying_spend), money: true },
+        { label: 'VISIBLE LEGISLATORS FUNDED', value: formatCount(connectedLegislatorIds.size) },
+        { label: 'VISIBLE CONTRIBUTION EDGES', value: formatCount(contributionEdges.length) },
+        { label: 'VISIBLE FIRMS HIRED', value: formatCount(hiredFirmCount) },
+      ],
+      connections: contributionEdges.map((edge) => {
+        const legislator = getNodeById(graph, edge.target)
+        return {
+          name: legislator?.label || edge.target,
+          detail: `${edge.amount_label || formatCurrency(edge.amount)} contributed`,
+          money: true,
+        }
+      }),
+    }
   }
 
-  if (type === 'Legislator') {
-    return (summary.top_contributing_orgs || []).slice(0, 3).map((org) => ({
-      name: org.name,
-      detail: `${formatCurrency(org.total_contributed)} contributed`,
-      money: true,
-    }))
+  if (node.type === 'legislator') {
+    const incomingContributions = allEdges
+      .filter((e) => e.type === 'contribution' && e.target === node.id)
+      .sort((a, b) => Number(b.amount || 0) - Number(a.amount || 0))
+    const totalIncoming = incomingContributions.reduce((sum, edge) => sum + Number(edge.amount || 0), 0)
+    const committees = allEdges
+      .filter((e) => e.type === 'member_of' && e.source === node.id)
+      .map((e) => getNodeById(graph, e.target))
+      .filter(Boolean)
+    return {
+      stats: [
+        { label: 'PARTY', value: node.party || 'N/A' },
+        { label: 'STATE', value: node.state || 'N/A' },
+        { label: 'COMMITTEES IN GRAPH', value: formatCount(committees.length) },
+        { label: 'TOTAL INCOMING CONTRIBUTIONS', value: formatCurrency(totalIncoming), money: true },
+      ],
+      connections: [
+        ...committees.map((committee) => ({
+          name: committee.label,
+          detail: 'Committee assignment',
+        })),
+        ...incomingContributions.map((edge) => {
+          const sourceOrg = getNodeById(graph, edge.source)
+          return {
+            name: sourceOrg?.label || edge.source,
+            detail: `${edge.amount_label || formatCurrency(edge.amount)} contributed`,
+            money: true,
+          }
+        }),
+      ],
+    }
   }
 
-  const lobbyFirms = (summary.top_lobbyists || []).slice(0, 2).map((firm) => ({
-    name: firm.name,
-    detail: `Lobbying firm · ${formatCount(firm.filings)} filings`,
-  }))
+  if (node.type === 'committee') {
+    const members = allEdges
+      .filter((e) => e.type === 'member_of' && e.target === node.id)
+      .map((e) => getNodeById(graph, e.source))
+      .filter(Boolean)
+    return {
+      stats: [
+        { label: 'MEMBERS IN GRAPH', value: formatCount(members.length) },
+        { label: 'CHAMBER', value: node.chamber || 'N/A' },
+        { label: 'NODE TYPE', value: 'Committee' },
+        { label: 'VISIBLE LINKS', value: formatCount(allEdges.filter((e) => e.target === node.id || e.source === node.id).length) },
+      ],
+      connections: members.map((member) => ({
+        name: member.label,
+        detail: `${member.party || 'N/A'} · ${member.state || 'N/A'}`,
+      })),
+    }
+  }
 
-  const legislators = (summary.top_recipient_legislators || []).slice(0, 2).map((recipient) => ({
-    name: recipient.name,
-    detail: `${formatCurrency(recipient.total_received)} contributed`,
-    money: true,
-  }))
-
-  return [...lobbyFirms, ...legislators]
+  return {
+    stats: [
+      { label: 'NODE TYPE', value: resolveType(node) },
+      { label: 'VISIBLE LINKS', value: formatCount(allEdges.filter((e) => e.target === node.id || e.source === node.id).length) },
+    ],
+    connections: [],
+  }
 }
 
 function PanelSkeleton() {
@@ -107,15 +136,14 @@ function PanelSkeleton() {
   )
 }
 
-export default function InfoPanel({ node, onExpand, filters }) {
+export default function InfoPanel({ node, graph, onExpand, loadingNodeId }) {
   const [summary, setSummary] = useState(null)
   const [loading, setLoading] = useState(false)
   const resolved = useMemo(() => resolveEntity(node), [node])
   const typeLabel = resolveType(node)
-  const yearRangeLabel = `${filters?.year_min || 2023}–${filters?.year_max || 2025}`
 
   useEffect(() => {
-    if (!resolved) {
+    if (!resolved || resolved.entityType !== 'organization') {
       setSummary(null)
       return
     }
@@ -127,8 +155,7 @@ export default function InfoPanel({ node, onExpand, filters }) {
       .finally(() => setLoading(false))
   }, [resolved])
 
-  const stats = buildStats(typeLabel, summary, yearRangeLabel)
-  const connections = buildConnections(typeLabel, summary)
+  const { stats, connections } = useMemo(() => buildGraphDrivenPanel(node, graph, summary), [node, graph, summary])
   const coveredPositions = Array.isArray(node?.covered_positions) ? node.covered_positions.filter(Boolean) : []
   const hasCoveredPositions = Boolean(node?.has_covered_position && coveredPositions.length > 0)
   const hasConviction = Boolean(node?.has_conviction)
@@ -209,8 +236,13 @@ export default function InfoPanel({ node, onExpand, filters }) {
           )}
 
           <hr className="rule" />
-          <button type="button" className="panel-network-btn" onClick={() => onExpand?.(node)}>
-            [ VIEW FULL NETWORK ]
+          <button
+            type="button"
+            className="panel-network-btn"
+            onClick={() => onExpand?.(node)}
+            disabled={Boolean(loadingNodeId && loadingNodeId === node.id)}
+          >
+            [ EXPAND NETWORK ]
           </button>
           <div className="info-panel-rule-strong" />
         </div>

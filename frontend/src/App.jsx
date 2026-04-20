@@ -9,17 +9,7 @@ import InfoPanel from './components/InfoPanel'
 import SearchBar from './components/SearchBar'
 import MyReps from './pages/MyReps'
 
-const seedGraph = {
-  nodes: [
-    { id: 'org-1', label: 'Example Pharma Inc.', type: 'organization', subtype: 'client' },
-    { id: 'leg-1', label: 'Sen. Alex Smith', type: 'legislator', party: 'D', state: 'PA' },
-    { id: 'com-1', label: 'Senate Finance Committee', type: 'committee' },
-  ],
-  edges: [
-    { source: 'org-1', target: 'leg-1', type: 'contribution', amount: 45000, cycle: 2024 },
-    { source: 'leg-1', target: 'com-1', type: 'member_of' },
-  ],
-}
+const seedGraph = { nodes: [], edges: [] }
 
 function mergeGraph(base, incoming) {
   const nodeMap = new Map(base.nodes.map((n) => [n.id, n]))
@@ -42,6 +32,30 @@ function resolveNodeFetchId(node, results) {
     if (legSearch) return { kind, id: legSearch.id }
   }
   return { kind, id: null }
+}
+
+function pickRootNode(result, payload) {
+  const nodes = payload?.nodes || []
+  if (!result || !nodes.length) return null
+
+  if (result.type === 'organization') {
+    return nodes.find((n) => n.id === `org-${result.id}`) || nodes.find((n) => n.type === 'organization') || null
+  }
+
+  if (result.type === 'legislator') {
+    return (
+      nodes.find((n) => n.type === 'legislator' && n.bioguide_id === result.id) ||
+      nodes.find((n) => n.id === `leg-${result.id}`) ||
+      nodes.find((n) => n.type === 'legislator') ||
+      null
+    )
+  }
+
+  if (result.type === 'issue') {
+    return nodes.find((n) => n.type === 'issue') || null
+  }
+
+  return null
 }
 
 function readRoute() {
@@ -76,6 +90,7 @@ export default function App() {
   const navRef = useRef(null)
   const filterRef = useRef(null)
   const lastRouteLegislatorRef = useRef(null)
+  const latestSearchSeqRef = useRef(0)
 
   const activeView = useMemo(() => getActiveView(route.pathname), [route.pathname])
   const sharedBioguideId = useMemo(() => getSharedBioguide(route.pathname), [route.pathname])
@@ -154,9 +169,52 @@ export default function App() {
   }, [activeView, route.pathname, route.search, filters])
 
   const onSearch = useCallback(async (q) => {
+    const searchSeq = latestSearchSeqRef.current + 1
+    latestSearchSeqRef.current = searchSeq
     const data = await searchEntities(q)
-    setResults(data.results || [])
-  }, [])
+    if (latestSearchSeqRef.current !== searchSeq) return []
+    const nextResults = data.results || []
+    setResults(nextResults)
+    if (!nextResults.length) return nextResults
+
+    const normalizedQ = (q || '').trim().toUpperCase()
+    const top = nextResults.find((r) => (r.name || '').toUpperCase().includes(normalizedQ)) || nextResults[0]
+    const organizationResults = nextResults.filter((r) => r.type === 'organization')
+    const hasExactOrganization = organizationResults.some((r) => (r.name || '').toUpperCase() === normalizedQ)
+    const isBroadOrganizationSearch = organizationResults.length >= 5 && !hasExactOrganization
+    if (activeView !== 'graph' || route.pathname !== '/explore') {
+      navigate('/explore')
+    }
+
+    setSelectedEntity(top)
+    setSelectedNode(null)
+    setLoadingNodeId(null)
+    setGraphLoading(true)
+    try {
+      let payload = null
+      if (isBroadOrganizationSearch) {
+        const payloads = await Promise.all(
+          organizationResults.slice(0, 6).map((orgResult) => fetchOrgGraph(orgResult.id, filters))
+        )
+        payload = payloads.reduce((acc, next) => mergeGraph(acc, next), seedGraph)
+        setSelectedEntity({ id: `issue-${q}`, type: 'issue', name: q })
+      } else if (top.type === 'organization') {
+        payload = await fetchOrgGraph(top.id, filters)
+      } else if (top.type === 'legislator') {
+        payload = await fetchLegGraph(top.id, filters)
+      } else {
+        payload = await fetchIssueGraph(top.name, filters)
+      }
+      if (payload) {
+        setGraph(payload)
+        setSelectedNode(pickRootNode(top, payload))
+      }
+    } finally {
+      setGraphLoading(false)
+    }
+
+    return nextResults
+  }, [activeView, route.pathname, navigate, filters])
 
   const onSelectResult = useCallback(async (result) => {
     if (activeView !== 'graph' || route.pathname !== '/explore') {
@@ -176,6 +234,7 @@ export default function App() {
         payload = await fetchIssueGraph(result.name, filters)
       }
       setGraph(payload)
+      setSelectedNode(pickRootNode(result, payload))
     } finally {
       setGraphLoading(false)
     }
@@ -335,7 +394,7 @@ export default function App() {
                 onNodeClick={onNodeClick}
               />
             </ErrorBoundary>
-            <InfoPanel node={selectedNode} onExpand={onExpand} filters={filters} />
+            <InfoPanel node={selectedNode} graph={graph} onExpand={onExpand} loadingNodeId={loadingNodeId} />
           </main>
         </section>
       )}

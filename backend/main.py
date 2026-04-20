@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from difflib import SequenceMatcher
 from typing import Optional
 from urllib import error as urllib_error
@@ -9,6 +10,7 @@ from urllib import request as urllib_request
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+import yaml
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -70,6 +72,9 @@ ZIP_FALLBACK = {
     "98101": ["M001176", "C001075", "J000298"],
     "80202": ["B001267", "H001052", "D000216"],
 }
+LEGISLATORS_CURRENT_YAML_URL = "https://raw.githubusercontent.com/unitedstates/congress-legislators/main/legislators-current.yaml"
+_LEGISLATOR_DIRECTORY_CACHE: dict = {"loaded_at": 0.0, "senators_by_state": {}, "rep_by_state_district": {}}
+_LEGISLATOR_DIRECTORY_TTL = 6 * 60 * 60
 
 app = FastAPI(title="LobbyWatch API", version="0.1.0")
 
@@ -291,6 +296,149 @@ def fetch_google_civic_members_by_zip(zipcode: str) -> list[dict]:
     return unique
 
 
+def fetch_state_code_by_zip(zipcode: str) -> Optional[str]:
+    url = f"https://api.zippopotam.us/us/{zipcode}"
+    try:
+        payload = fetch_json_from_url(url)
+    except Exception:
+        return None
+
+    places = payload.get("places") or []
+    if not places:
+        return None
+    place = places[0] if isinstance(places[0], dict) else {}
+    state_code = place.get("state abbreviation") or place.get("state_abbreviation")
+    if state_code:
+        return normalize_state_code(state_code)
+    return normalize_state_code(place.get("state"))
+
+
+def fetch_zip_coordinates(zipcode: str) -> tuple[Optional[float], Optional[float], Optional[str]]:
+    url = f"https://api.zippopotam.us/us/{zipcode}"
+    try:
+        payload = fetch_json_from_url(url)
+    except Exception:
+        return None, None, None
+
+    places = payload.get("places") or []
+    if not places:
+        return None, None, None
+    place = places[0] if isinstance(places[0], dict) else {}
+    state_code = normalize_state_code(place.get("state abbreviation") or place.get("state_abbreviation"))
+    try:
+        lat = float(place.get("latitude"))
+        lon = float(place.get("longitude"))
+    except Exception:
+        return None, None, state_code
+    return lat, lon, state_code
+
+
+def fetch_congressional_district_for_point(lat: float, lon: float) -> Optional[int]:
+    params = {
+        "x": lon,
+        "y": lat,
+        "benchmark": "Public_AR_Current",
+        "vintage": "Current_Current",
+        "format": "json",
+    }
+    url = f"https://geocoding.geo.census.gov/geocoder/geographies/coordinates?{urllib_parse.urlencode(params)}"
+    try:
+        payload = fetch_json_from_url(url)
+    except Exception:
+        return None
+
+    geographies = ((payload.get("result") or {}).get("geographies") or {})
+    cd_rows = []
+    for key, rows in geographies.items():
+        if "Congressional Districts" in key and isinstance(rows, list):
+            cd_rows = rows
+            break
+    if not cd_rows:
+        return None
+    row = cd_rows[0] if isinstance(cd_rows[0], dict) else {}
+    raw_cd = row.get("CD119") or row.get("BASENAME") or row.get("NAME")
+    if raw_cd is None:
+        return None
+    text_value = str(raw_cd).strip()
+    match = re.search(r"(\d{1,2})", text_value)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def current_legislator_directory() -> dict:
+    now = time.time()
+    if (
+        _LEGISLATOR_DIRECTORY_CACHE["loaded_at"]
+        and (now - _LEGISLATOR_DIRECTORY_CACHE["loaded_at"]) < _LEGISLATOR_DIRECTORY_TTL
+    ):
+        return _LEGISLATOR_DIRECTORY_CACHE
+
+    try:
+        req = urllib_request.Request(
+            LEGISLATORS_CURRENT_YAML_URL,
+            headers={"User-Agent": "LobbyWatch/1.0"},
+        )
+        with urllib_request.urlopen(req, timeout=30) as resp:
+            payload = resp.read().decode("utf-8", errors="replace")
+        records = yaml.safe_load(payload) or []
+    except Exception:
+        return _LEGISLATOR_DIRECTORY_CACHE
+
+    senators_by_state: dict[str, list[str]] = {}
+    rep_by_state_district: dict[tuple[str, int], str] = {}
+    for row in records:
+        if not isinstance(row, dict):
+            continue
+        bioguide = ((row.get("id") or {}).get("bioguide") or "").strip()
+        if not bioguide:
+            continue
+        terms = row.get("terms") or []
+        if not terms:
+            continue
+        term = terms[-1] if isinstance(terms[-1], dict) else {}
+        state_code = normalize_state_code(term.get("state"))
+        if not state_code:
+            continue
+        term_type = str(term.get("type") or "").strip().lower()
+        if term_type == "sen":
+            senators_by_state.setdefault(state_code, []).append(bioguide)
+            continue
+        if term_type == "rep":
+            district_raw = term.get("district")
+            try:
+                district = int(district_raw)
+            except Exception:
+                continue
+            rep_by_state_district[(state_code, district)] = bioguide
+
+    _LEGISLATOR_DIRECTORY_CACHE["loaded_at"] = now
+    _LEGISLATOR_DIRECTORY_CACHE["senators_by_state"] = senators_by_state
+    _LEGISLATOR_DIRECTORY_CACHE["rep_by_state_district"] = rep_by_state_district
+    return _LEGISLATOR_DIRECTORY_CACHE
+
+
+def direct_candidates_for_zip(db: Session, zipcode: str) -> list[dict]:
+    lat, lon, state_code = fetch_zip_coordinates(zipcode)
+    if lat is None or lon is None or not state_code:
+        return []
+    district = fetch_congressional_district_for_point(lat, lon)
+    if district is None:
+        return []
+
+    directory = current_legislator_directory()
+    senators = list((directory.get("senators_by_state") or {}).get(state_code, []))[:2]
+    house_bioguide = (directory.get("rep_by_state_district") or {}).get((state_code, district))
+
+    ordered_bioguide_ids = [*senators]
+    if house_bioguide:
+        ordered_bioguide_ids.append(house_bioguide)
+    if not ordered_bioguide_ids:
+        return []
+
+    return fetch_legislators_by_bioguide_ids(db, ordered_bioguide_ids)
+
+
 def fetch_legislators_by_bioguide_ids(db: Session, bioguide_ids: list[str]) -> list[dict]:
     if not bioguide_ids:
         return []
@@ -337,6 +485,59 @@ def build_betrayal_map(db: Session) -> dict[str, dict]:
 def fallback_candidates_for_zip(db: Session, zipcode: str) -> list[dict]:
     ids = ZIP_FALLBACK.get(zipcode, [])
     return fetch_legislators_by_bioguide_ids(db, ids)
+
+
+def fallback_candidates_for_state(db: Session, state_code: Optional[str]) -> list[dict]:
+    if not state_code:
+        return []
+
+    rows = db.execute(
+        text(
+            """
+            SELECT id, bioguide_id, name, party, state, chamber
+            FROM legislators
+            WHERE is_active = TRUE
+            ORDER BY name
+            """
+        )
+    ).all()
+
+    in_state = []
+    for row in rows:
+        if normalize_state_code(row.state) != state_code:
+            continue
+        in_state.append(
+            {
+                "id": row.id,
+                "bioguide_id": row.bioguide_id,
+                "name": row.name,
+                "party": row.party,
+                "state": row.state,
+                "chamber": normalize_chamber(row.chamber),
+            }
+        )
+
+    if not in_state:
+        return []
+
+    senate = [row for row in in_state if row.get("chamber") == "senate"]
+    house = [row for row in in_state if row.get("chamber") == "house"]
+
+    selected: list[dict] = []
+    selected.extend(senate[:2])
+    if house:
+        selected.append(house[0])
+
+    seen = {row["bioguide_id"] for row in selected}
+    for row in in_state:
+        if len(selected) >= 3:
+            break
+        if row["bioguide_id"] in seen:
+            continue
+        selected.append(row)
+        seen.add(row["bioguide_id"])
+
+    return selected
 
 
 def ranked_legislator_matches(db: Session, candidates: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -733,15 +934,31 @@ def representatives(
         }
         return {"zip": zip, "representatives": [build_representative_payload(db, legislator, betrayal_by_name)], "unmatched": []}
     else:
-        candidates = fetch_congress_members_by_zip(zip)
-        if len(candidates) > 5 or len(candidates) < 1:
-            candidates = []
+        direct_rows = direct_candidates_for_zip(db, zip)
+        fallback_rows = []
+        if direct_rows:
+            fallback_rows = direct_rows
+            candidates = [
+                {
+                    "name": row["name"],
+                    "party": row["party"],
+                    "state": normalize_state_code(row["state"]),
+                    "chamber": normalize_chamber(row["chamber"]),
+                }
+                for row in fallback_rows
+            ]
+        else:
+            candidates = fetch_congress_members_by_zip(zip)
+            if len(candidates) > 5 or len(candidates) < 1:
+                candidates = []
         if not candidates:
             candidates = fetch_google_civic_members_by_zip(zip)
 
-        fallback_rows = []
         if not candidates:
             fallback_rows = fallback_candidates_for_zip(db, zip)
+            if not fallback_rows:
+                state_code = fetch_state_code_by_zip(zip)
+                fallback_rows = fallback_candidates_for_state(db, state_code)
             if fallback_rows:
                 candidates = [
                     {

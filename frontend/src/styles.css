@@ -444,6 +444,21 @@ select {
   background: #ffffff;
 }
 
+.graph-tooltip {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+  z-index: 5;
+  transform: translate(-50%, -100%);
+  background: #ffffff;
+  border: 1px solid var(--border);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 12px;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
 .graph-overlay {
   position: absolute;
   inset: 0;

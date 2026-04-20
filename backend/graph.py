@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from models import (
@@ -10,7 +10,6 @@ from models import (
     LobbyingRegistration,
     Lobbyist,
     Organization,
-    Vote,
 )
 
 
@@ -62,14 +61,27 @@ def safe_amount(amount) -> float:
         return 0.0
 
 
-def _apply_filters_for_registrations(query, year_min=None, year_max=None, issue_code=None):
-    if year_min:
-        query = query.where(LobbyingRegistration.filing_year >= year_min)
-    if year_max:
-        query = query.where(LobbyingRegistration.filing_year <= year_max)
-    if issue_code:
-        query = query.where(LobbyingRegistration.issue_codes.any(issue_code))
-    return query
+NODE_COLORS = {
+    "organization": "#1a1a1a",
+    "firm": "#1a1a1a",
+    "legislator": "#2563eb",
+    "committee": "#92400e",
+    "lobbyist": "#6b7280",
+}
+
+
+def _normalize_issue_codes(value):
+    if not value:
+        return []
+    seen = set()
+    normalized = []
+    for item in value:
+        code = str(item or "").strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        normalized.append(code)
+    return normalized
 
 
 def get_organization_graph(
@@ -86,73 +98,84 @@ def get_organization_graph(
     org = db.get(Organization, org_id)
     if not org:
         return g.build()
-    g.add_node(f"org-{org.id}", org.name, "organization", subtype=org.type)
 
-    reg_query = select(LobbyingRegistration).where(
-        (LobbyingRegistration.client_id == org_id) | (LobbyingRegistration.registrant_id == org_id)
+    g.add_node(f"org-{org.id}", org.name, "organization", subtype=org.type, color=NODE_COLORS["organization"])
+
+    committee_reserve = max(4, max_nodes // 6)
+    available_for_org_and_leg = max(2, max_nodes - 1 - committee_reserve)
+    firm_limit = max(1, available_for_org_and_leg // 2)
+    legislator_limit = max(1, available_for_org_and_leg - firm_limit)
+
+    firms_query = text(
+        """
+        SELECT
+          r.id AS registrant_id,
+          r.name AS registrant_name,
+          r.name_normalized AS name_normalized,
+          COUNT(lr.id) AS filing_count,
+          COALESCE(SUM(lr.amount), 0) AS total_amount,
+          COALESCE(
+            ARRAY_AGG(DISTINCT issue_code) FILTER (WHERE issue_code IS NOT NULL),
+            ARRAY[]::text[]
+          ) AS issue_codes
+        FROM lobbying_registrations lr
+        JOIN organizations r ON lr.registrant_id = r.id
+        LEFT JOIN LATERAL UNNEST(COALESCE(lr.general_issue_codes, lr.issue_codes, ARRAY[]::text[])) issue_code ON TRUE
+        WHERE lr.client_id = :org_id
+          AND lr.filing_year >= COALESCE(:year_min, lr.filing_year)
+          AND lr.filing_year <= COALESCE(:year_max, lr.filing_year)
+          AND (
+            COALESCE(:issue_code, '') = ''
+            OR COALESCE(:issue_code, '') = ANY(COALESCE(lr.general_issue_codes, lr.issue_codes, ARRAY[]::text[]))
+          )
+        GROUP BY r.id, r.name, r.name_normalized
+        ORDER BY COALESCE(SUM(lr.amount), 0) DESC, COUNT(lr.id) DESC
+        LIMIT :limit
+        """
     )
-    reg_query = _apply_filters_for_registrations(reg_query, year_min, year_max, issue_code)
-    regs = db.execute(reg_query.limit(50)).scalars().all()
+    firm_rows = db.execute(
+        firms_query,
+        {
+            "org_id": org_id,
+            "year_min": year_min,
+            "year_max": year_max,
+            "issue_code": issue_code,
+            "limit": firm_limit,
+        },
+    ).all()
 
-    issue_tags = set()
-    reg_ids = [r.id for r in regs]
-
-    for r in regs:
-        reg_node = f"reg-{r.id}"
-        if not g.add_node(reg_node, f"Filing {r.filing_uuid[:8]}", "registration", amount=float(r.amount or 0), filing_year=r.filing_year):
-            break
-        g.add_edge(
-            f"org-{org.id}",
-            reg_node,
-            "filed_or_targeted",
-            has_foreign_entity=bool(r.has_foreign_entity),
-            foreign_countries=r.foreign_entity_countries or [],
-        )
-        for issue in r.issue_codes or []:
-            issue_tags.add(issue)
-
-        if r.registrant_id and r.registrant_id != org.id:
-            registrant = db.get(Organization, r.registrant_id)
-            if registrant and g.add_node(f"org-{registrant.id}", registrant.name, "organization", subtype=registrant.type):
-                g.add_edge(
-                    f"org-{registrant.id}",
-                    reg_node,
-                    "registrant",
-                    has_foreign_entity=bool(r.has_foreign_entity),
-                    foreign_countries=r.foreign_entity_countries or [],
-                )
-        if r.client_id and r.client_id != org.id:
-            client = db.get(Organization, r.client_id)
-            if client and g.add_node(f"org-{client.id}", client.name, "organization", subtype=client.type):
-                g.add_edge(
-                    f"org-{client.id}",
-                    reg_node,
-                    "client",
-                    has_foreign_entity=bool(r.has_foreign_entity),
-                    foreign_countries=r.foreign_entity_countries or [],
-                )
-
-    if reg_ids:
-        lobbyist_rows = db.execute(
-            select(Lobbyist, LobbyingLobbyist.registration_id)
-            .join(LobbyingLobbyist, LobbyingLobbyist.lobbyist_id == Lobbyist.id)
-            .where(LobbyingLobbyist.registration_id.in_(reg_ids))
-        ).all()
-        for lobbyist, reg_id in lobbyist_rows:
-            lob_node = f"lob-{lobbyist.id}"
-            if g.add_node(
-                lob_node,
-                lobbyist.name,
-                "lobbyist",
-                has_covered_position=bool(lobbyist.has_covered_position),
-                covered_positions=lobbyist.covered_positions or [],
-                has_conviction=bool(lobbyist.has_conviction),
-                conviction_disclosure=lobbyist.conviction_disclosure,
-            ):
-                g.add_edge(f"reg-{reg_id}", lob_node, "represented_by")
+    for row in firm_rows:
+        firm_id = f"org-{row.registrant_id}"
+        if row.registrant_id == org_id:
+            continue
+        if g.add_node(
+            firm_id,
+            row.registrant_name,
+            "organization",
+            subtype="firm",
+            color=NODE_COLORS["firm"],
+        ):
+            total_amount = safe_amount(row.total_amount)
+            g.add_edge(
+                f"org-{org.id}",
+                firm_id,
+                "hired_firm",
+                filing_count=int(row.filing_count or 0),
+                amount=total_amount,
+                amount_label=format_amount_label(total_amount),
+                issue_codes=_normalize_issue_codes(row.issue_codes),
+            )
 
     contrib_query = (
-        select(Contribution, Legislator)
+        select(
+            Legislator.id.label("legislator_id"),
+            Legislator.name.label("name"),
+            Legislator.party.label("party"),
+            Legislator.state.label("state"),
+            Legislator.bioguide_id.label("bioguide_id"),
+            func.coalesce(func.sum(Contribution.amount), 0).label("total_contributed"),
+            func.count(Contribution.id).label("contribution_count"),
+        )
         .join(Legislator, Legislator.id == Contribution.recipient_legislator_id)
         .where(Contribution.contributor_org_id == org_id)
     )
@@ -160,29 +183,35 @@ def get_organization_graph(
         contrib_query = contrib_query.where(func.extract("year", Contribution.contribution_date) >= year_min)
     if year_max:
         contrib_query = contrib_query.where(func.extract("year", Contribution.contribution_date) <= year_max)
+    contrib_query = contrib_query.group_by(
+        Legislator.id, Legislator.name, Legislator.party, Legislator.state, Legislator.bioguide_id
+    )
     if min_contribution:
-        contrib_query = contrib_query.where(Contribution.amount >= min_contribution)
+        contrib_query = contrib_query.having(func.sum(Contribution.amount) >= min_contribution)
+    contrib_query = contrib_query.order_by(func.sum(Contribution.amount).desc()).limit(legislator_limit)
+    contrib_rows = db.execute(contrib_query).all()
 
-    contrib_rows = db.execute(contrib_query.limit(100)).all()
-    legislator_ids = set()
-    for contribution, legislator in contrib_rows:
-        leg_node = f"leg-{legislator.id}"
-        legislator_ids.add(legislator.id)
+    legislator_ids = []
+    for row in contrib_rows:
+        legislator_ids.append(row.legislator_id)
+        leg_node = f"leg-{row.legislator_id}"
         if g.add_node(
             leg_node,
-            legislator.name,
+            row.name,
             "legislator",
-            party=legislator.party,
-            state=legislator.state,
-            bioguide_id=legislator.bioguide_id,
+            party=row.party,
+            state=row.state,
+            bioguide_id=row.bioguide_id,
+            color=NODE_COLORS["legislator"],
         ):
+            total_contributed = safe_amount(row.total_contributed)
             g.add_edge(
                 f"org-{org.id}",
                 leg_node,
                 "contribution",
-                amount=safe_amount(contribution.amount),
-                amount_label=format_amount_label(contribution.amount),
-                cycle=contribution.cycle,
+                amount=total_contributed,
+                amount_label=format_amount_label(total_contributed),
+                contribution_count=int(row.contribution_count or 0),
             )
 
     if legislator_ids:
@@ -191,26 +220,17 @@ def get_organization_graph(
             .join(Committee, Committee.id == CommitteeMembership.committee_id)
             .where(CommitteeMembership.legislator_id.in_(legislator_ids))
         ).all()
-        committee_ids = set()
         for cm, committee in cm_rows:
-            committee_ids.add(committee.id)
             com_node = f"com-{committee.id}"
-            if g.add_node(com_node, committee.name, "committee", chamber=committee.chamber):
+            if g.add_node(
+                com_node,
+                committee.name,
+                "committee",
+                chamber=committee.chamber,
+                committee_code=committee.committee_id,
+                color=NODE_COLORS["committee"],
+            ):
                 g.add_edge(f"leg-{cm.legislator_id}", com_node, "member_of", role=cm.role)
-
-        vote_query = select(Vote).where(Vote.legislator_id.in_(legislator_ids))
-        if year_min:
-            vote_query = vote_query.where(func.extract("year", Vote.vote_date) >= year_min)
-        if year_max:
-            vote_query = vote_query.where(func.extract("year", Vote.vote_date) <= year_max)
-        if issue_tags:
-            vote_query = vote_query.where(Vote.issue_tags.overlap(list(issue_tags)))
-
-        vote_rows = db.execute(vote_query.limit(100)).scalars().all()
-        for vote in vote_rows:
-            vote_node = f"vote-{vote.id}"
-            if g.add_node(vote_node, vote.bill_title or vote.bill_id or "Vote", "vote", vote_position=vote.vote_position):
-                g.add_edge(f"leg-{vote.legislator_id}", vote_node, "voted", position=vote.vote_position)
 
     return g.build()
 
@@ -235,29 +255,39 @@ def get_legislator_graph(
         party=legislator.party,
         state=legislator.state,
         bioguide_id=legislator.bioguide_id,
+        color=NODE_COLORS["legislator"],
     )
 
-    contrib_rows = db.execute(
-        select(Organization, func.sum(Contribution.amount).label("total"), func.max(Contribution.cycle).label("latest_cycle"))
+    contrib_query = (
+        select(
+            Organization,
+            func.coalesce(func.sum(Contribution.amount), 0).label("total"),
+            func.count(Contribution.id).label("contribution_count"),
+        )
         .join(Contribution, Contribution.contributor_org_id == Organization.id)
         .where(Contribution.recipient_legislator_id == legislator.id)
-        .group_by(Organization.id)
-        .order_by(func.sum(Contribution.amount).desc())
-        .limit(40)
-    ).all()
+    )
+    if year_min:
+        contrib_query = contrib_query.where(func.extract("year", Contribution.contribution_date) >= year_min)
+    if year_max:
+        contrib_query = contrib_query.where(func.extract("year", Contribution.contribution_date) <= year_max)
+    contrib_query = contrib_query.group_by(Organization.id).order_by(func.sum(Contribution.amount).desc()).limit(max_nodes)
+    if min_contribution:
+        contrib_query = contrib_query.having(func.sum(Contribution.amount) >= min_contribution)
 
-    for org, total, latest_cycle in contrib_rows:
-        if min_contribution and float(total or 0) < float(min_contribution):
-            continue
+    contrib_rows = db.execute(contrib_query).all()
+
+    for org, total, contribution_count in contrib_rows:
         org_node = f"org-{org.id}"
-        if g.add_node(org_node, org.name, "organization", subtype=org.type):
+        if g.add_node(org_node, org.name, "organization", subtype=org.type, color=NODE_COLORS["organization"]):
+            total_amount = safe_amount(total)
             g.add_edge(
                 org_node,
                 f"leg-{legislator.id}",
                 "contribution",
-                amount=safe_amount(total),
-                amount_label=format_amount_label(total),
-                cycle=latest_cycle,
+                amount=total_amount,
+                amount_label=format_amount_label(total_amount),
+                contribution_count=int(contribution_count or 0),
             )
 
     cm_rows = db.execute(
@@ -265,39 +295,17 @@ def get_legislator_graph(
         .join(Committee, Committee.id == CommitteeMembership.committee_id)
         .where(CommitteeMembership.legislator_id == legislator.id)
     ).all()
-    committee_ids = []
     for cm, committee in cm_rows:
-        committee_ids.append(committee.id)
         com_node = f"com-{committee.id}"
-        if g.add_node(com_node, committee.name, "committee", chamber=committee.chamber):
+        if g.add_node(
+            com_node,
+            committee.name,
+            "committee",
+            chamber=committee.chamber,
+            committee_code=committee.committee_id,
+            color=NODE_COLORS["committee"],
+        ):
             g.add_edge(f"leg-{legislator.id}", com_node, "member_of", role=cm.role)
-
-    vote_query = select(Vote).where(Vote.legislator_id == legislator.id).order_by(Vote.vote_date.desc()).limit(50)
-    if year_min:
-        vote_query = vote_query.where(func.extract("year", Vote.vote_date) >= year_min)
-    if year_max:
-        vote_query = vote_query.where(func.extract("year", Vote.vote_date) <= year_max)
-
-    vote_rows = db.execute(vote_query).scalars().all()
-    issue_tags = set()
-    for vote in vote_rows:
-        vote_node = f"vote-{vote.id}"
-        if g.add_node(vote_node, vote.bill_title or vote.bill_id or "Vote", "vote", vote_position=vote.vote_position):
-            g.add_edge(f"leg-{legislator.id}", vote_node, "voted", position=vote.vote_position)
-        for tag in vote.issue_tags or []:
-            issue_tags.add(tag)
-
-    if committee_ids and issue_tags:
-        rel_orgs = db.execute(
-            select(Organization)
-            .join(LobbyingRegistration, LobbyingRegistration.client_id == Organization.id)
-            .where(LobbyingRegistration.issue_codes.overlap(list(issue_tags)))
-            .limit(25)
-        ).scalars().all()
-        for org in rel_orgs:
-            org_node = f"org-{org.id}"
-            if g.add_node(org_node, org.name, "organization", subtype=org.type):
-                g.add_edge(org_node, f"leg-{legislator.id}", "lobbied_related_issues")
 
     return g.build()
 
@@ -311,81 +319,146 @@ def get_issue_graph(
     max_nodes: int = 50,
 ):
     g = GraphBuilder(max_nodes=max_nodes)
+    search_term = (q or "").strip()
+    if not search_term:
+        return g.build()
 
-    reg_query = (
-        select(LobbyingRegistration)
-        .where(LobbyingRegistration.specific_issues.ilike(f"%{q}%"))
-        .limit(60)
+    issue_query = text(
+        """
+        SELECT
+          c.id AS client_id,
+          c.name AS client_name,
+          c.type AS client_type,
+          r.id AS registrant_id,
+          r.name AS registrant_name,
+          COUNT(lr.id) AS filing_count,
+          COALESCE(SUM(lr.amount), 0) AS total_amount,
+          COALESCE(
+            ARRAY_AGG(DISTINCT issue_code) FILTER (WHERE issue_code IS NOT NULL),
+            ARRAY[]::text[]
+          ) AS issue_codes
+        FROM lobbying_registrations lr
+        JOIN organizations c ON c.id = lr.client_id
+        JOIN organizations r ON r.id = lr.registrant_id
+        LEFT JOIN LATERAL UNNEST(COALESCE(lr.general_issue_codes, lr.issue_codes, ARRAY[]::text[])) issue_code ON TRUE
+        WHERE (
+            lr.specific_issues_tsv @@ plainto_tsquery('english', :q)
+            OR lr.specific_issues ILIKE :ilike_q
+            OR :q_upper = ANY(COALESCE(lr.general_issue_codes, lr.issue_codes, ARRAY[]::text[]))
+          )
+          AND lr.filing_year >= COALESCE(:year_min, lr.filing_year)
+          AND lr.filing_year <= COALESCE(:year_max, lr.filing_year)
+        GROUP BY c.id, c.name, c.type, r.id, r.name
+        ORDER BY COALESCE(SUM(lr.amount), 0) DESC, COUNT(lr.id) DESC
+        LIMIT :limit
+        """
     )
-    if year_min:
-        reg_query = reg_query.where(LobbyingRegistration.filing_year >= year_min)
-    if year_max:
-        reg_query = reg_query.where(LobbyingRegistration.filing_year <= year_max)
 
-    regs = db.execute(reg_query).scalars().all()
+    rows = db.execute(
+        issue_query,
+        {
+            "q": search_term,
+            "ilike_q": f"%{search_term}%",
+            "q_upper": search_term.upper(),
+            "year_min": year_min,
+            "year_max": year_max,
+            "limit": max_nodes * 2,
+        },
+    ).all()
 
-    org_ids = set()
-    issue_codes = set()
-    issue_node_id = f"issue-{q[:40].lower().replace(' ', '-') }"
-    g.add_node(issue_node_id, q, "issue")
+    for row in rows:
+        client_node = f"org-{row.client_id}"
+        firm_node = f"org-{row.registrant_id}"
+        if g.add_node(
+            client_node,
+            row.client_name,
+            "organization",
+            subtype=row.client_type,
+            color=NODE_COLORS["organization"],
+        ):
+            pass
+        if g.add_node(firm_node, row.registrant_name, "organization", subtype="firm", color=NODE_COLORS["firm"]):
+            pass
+        total_amount = safe_amount(row.total_amount)
+        g.add_edge(
+            client_node,
+            firm_node,
+            "hired_firm",
+            filing_count=int(row.filing_count or 0),
+            amount=total_amount,
+            amount_label=format_amount_label(total_amount),
+            issue_codes=_normalize_issue_codes(row.issue_codes),
+        )
 
-    for r in regs:
-        for oid in [r.client_id, r.registrant_id]:
-            if not oid:
-                continue
-            org_ids.add(oid)
-            org = db.get(Organization, oid)
-            if org and g.add_node(f"org-{org.id}", org.name, "organization", subtype=org.type):
-                g.add_edge(
-                    f"org-{org.id}",
-                    issue_node_id,
-                    "lobbied_on",
-                    filing_year=r.filing_year,
-                    has_foreign_entity=bool(r.has_foreign_entity),
-                    foreign_countries=r.foreign_entity_countries or [],
-                )
-        for code in r.issue_codes or []:
-            issue_codes.add(code)
-
+    org_ids = [int(node_id.split("-", 1)[1]) for node_id in g.nodes.keys() if node_id.startswith("org-")]
     if org_ids:
-        contrib_rows = db.execute(
-            select(Contribution, Legislator)
+        contrib_query = (
+            select(
+                Contribution.contributor_org_id.label("org_id"),
+                Legislator.id.label("leg_id"),
+                Legislator.name.label("name"),
+                Legislator.party.label("party"),
+                Legislator.state.label("state"),
+                Legislator.bioguide_id.label("bioguide_id"),
+                func.coalesce(func.sum(Contribution.amount), 0).label("total_contributed"),
+            )
             .join(Legislator, Legislator.id == Contribution.recipient_legislator_id)
-            .where(Contribution.contributor_org_id.in_(list(org_ids)))
-            .limit(100)
-        ).all()
+            .where(Contribution.contributor_org_id.in_(org_ids))
+        )
+        if year_min:
+            contrib_query = contrib_query.where(func.extract("year", Contribution.contribution_date) >= year_min)
+        if year_max:
+            contrib_query = contrib_query.where(func.extract("year", Contribution.contribution_date) <= year_max)
+        contrib_query = contrib_query.group_by(
+            Contribution.contributor_org_id,
+            Legislator.id,
+            Legislator.name,
+            Legislator.party,
+            Legislator.state,
+            Legislator.bioguide_id,
+        )
+        if min_contribution:
+            contrib_query = contrib_query.having(func.sum(Contribution.amount) >= min_contribution)
+        contrib_query = contrib_query.order_by(func.sum(Contribution.amount).desc()).limit(max_nodes * 3)
+
         leg_ids = set()
-        for c, leg in contrib_rows:
-            if min_contribution and float(c.amount or 0) < float(min_contribution):
-                continue
-            leg_ids.add(leg.id)
-            if g.add_node(
-                f"leg-{leg.id}",
-                leg.name,
+        for row in db.execute(contrib_query).all():
+            leg_ids.add(row.leg_id)
+            leg_node = f"leg-{row.leg_id}"
+            g.add_node(
+                leg_node,
+                row.name,
                 "legislator",
-                party=leg.party,
-                state=leg.state,
-                bioguide_id=leg.bioguide_id,
-            ):
-                g.add_edge(
-                    f"org-{c.contributor_org_id}",
-                    f"leg-{leg.id}",
-                    "contribution",
-                    amount=safe_amount(c.amount),
-                    amount_label=format_amount_label(c.amount),
-                    cycle=c.cycle,
-                )
+                party=row.party,
+                state=row.state,
+                bioguide_id=row.bioguide_id,
+                color=NODE_COLORS["legislator"],
+            )
+            total_contributed = safe_amount(row.total_contributed)
+            g.add_edge(
+                f"org-{row.org_id}",
+                leg_node,
+                "contribution",
+                amount=total_contributed,
+                amount_label=format_amount_label(total_contributed),
+            )
 
         if leg_ids:
-            cm_rows = db.execute(
+            for cm, committee in db.execute(
                 select(CommitteeMembership, Committee)
                 .join(Committee, Committee.id == CommitteeMembership.committee_id)
                 .where(CommitteeMembership.legislator_id.in_(list(leg_ids)))
-                .limit(100)
-            ).all()
-            for cm, committee in cm_rows:
-                if g.add_node(f"com-{committee.id}", committee.name, "committee", chamber=committee.chamber):
-                    g.add_edge(f"leg-{cm.legislator_id}", f"com-{committee.id}", "member_of", role=cm.role)
+            ).all():
+                com_node = f"com-{committee.id}"
+                g.add_node(
+                    com_node,
+                    committee.name,
+                    "committee",
+                    chamber=committee.chamber,
+                    committee_code=committee.committee_id,
+                    color=NODE_COLORS["committee"],
+                )
+                g.add_edge(f"leg-{cm.legislator_id}", com_node, "member_of", role=cm.role)
 
     return g.build()
 
