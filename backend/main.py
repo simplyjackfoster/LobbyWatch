@@ -10,6 +10,8 @@ from urllib import request as urllib_request
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 import yaml
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -1297,3 +1299,13 @@ def foreign_influence(
 
     findings.sort(key=lambda x: x["filing_count"], reverse=True)
     return {"findings": findings[:limit]}
+
+
+# Serve React frontend — must come after all API routes
+_FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+if os.path.isdir(_FRONTEND_DIST):
+    app.mount("/assets", StaticFiles(directory=os.path.join(_FRONTEND_DIST, "assets")), name="assets")
+
+    @app.get("/{full_path:path}")
+    def serve_frontend(full_path: str):
+        return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
