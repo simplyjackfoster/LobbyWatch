@@ -1302,10 +1302,16 @@ def foreign_influence(
 
 
 # Serve React frontend — must come after all API routes
-_FRONTEND_DIST = os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
-if os.path.isdir(_FRONTEND_DIST):
-    app.mount("/assets", StaticFiles(directory=os.path.join(_FRONTEND_DIST, "assets")), name="assets")
+_FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
+_FRONTEND_ASSETS = os.path.join(_FRONTEND_DIST, "assets")
 
-    @app.get("/{full_path:path}")
-    def serve_frontend(full_path: str):
-        return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
+if os.path.isdir(_FRONTEND_ASSETS):
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_ASSETS), name="assets")
+
+@app.get("/")
+def serve_root():
+    return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
+
+@app.get("/{full_path:path}")
+def serve_frontend(full_path: str):
+    return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
