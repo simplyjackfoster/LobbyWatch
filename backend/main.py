@@ -1314,4 +1314,7 @@ def serve_root():
 
 @app.get("/{full_path:path}")
 def serve_frontend(full_path: str):
+    file_path = os.path.join(_FRONTEND_DIST, full_path)
+    if os.path.isfile(file_path):
+        return FileResponse(file_path)
     return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
