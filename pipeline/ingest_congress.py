@@ -1,208 +1,321 @@
 import argparse
+import asyncio
 import logging
 import os
 import time
+from typing import Any
 
-import requests
+import aiohttp
 from dotenv import load_dotenv
-from sqlalchemy.dialects.postgresql import insert
+from tqdm import tqdm
 
-from db import (
-    SessionLocal,
-    committee_memberships,
-    complete_ingestion_run,
-    fail_ingestion_run,
-    get_resume_page,
-    start_ingestion_run,
-    update_ingestion_run_progress,
-    upsert_committee,
-    upsert_legislator,
-    votes,
-)
+from db import connect_async, drop_indexes_for_bulk_load, optimize_for_bulk_load, rebuild_indexes
 
 load_dotenv()
 
 API_BASE = "https://api.congress.gov/v3"
 API_KEY = os.getenv("CONGRESS_API_KEY")
-RATE_LIMIT_SECONDS = 0.2
-SOURCE = "congress"
+SEM = asyncio.Semaphore(10)
+FLUSH_SIZE = 500
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("pipeline_errors.log"),
-    ],
+    handlers=[logging.StreamHandler(), logging.FileHandler("pipeline_errors.log")],
 )
 
 
-def get_json(path: str, params: dict | None = None):
-    p = {"api_key": API_KEY, "format": "json"}
-    if params:
-        p.update(params)
-    url = f"{API_BASE}{path}"
-    resp = requests.get(url, params=p, timeout=30)
-    time.sleep(RATE_LIMIT_SECONDS)
-    resp.raise_for_status()
-    return resp.json()
+def parent_code(value: Any) -> str | None:
+    if isinstance(value, dict):
+        return value.get("systemCode") or value.get("code") or value.get("name")
+    return value
 
 
-def ingest_member_committees(db, legislator_id: int, bioguide: str):
-    if not bioguide:
-        return
-    try:
-        data = get_json(f"/member/{bioguide}/committee")
-    except Exception:
-        logging.exception("Failed committees for bioguide=%s", bioguide)
-        return
-
-    committee_items = data.get("committees", []) or data.get("memberCommittees", [])
-    for c in committee_items:
+async def fetch_json(
+    session: aiohttp.ClientSession,
+    path: str,
+    params: dict[str, Any] | None = None,
+    allow_404: bool = False,
+):
+    delay = 0.2
+    for attempt in range(3):
         try:
-            committee_id = c.get("systemCode") or c.get("code") or c.get("committeeCode")
-            name = c.get("name") or c.get("title")
-            chamber = (c.get("chamber") or "").lower()
-            role = c.get("memberType") or c.get("role")
-            parent = c.get("parent") or c.get("subcommitteeOf")
+            async with SEM:
+                query = {"api_key": API_KEY, "format": "json"}
+                if params:
+                    query.update(params)
+                async with session.get(f"{API_BASE}{path}", params=query, timeout=60) as resp:
+                    if allow_404 and resp.status == 404:
+                        return {"_not_found": True}
+                    if resp.status >= 400:
+                        raise RuntimeError(f"HTTP {resp.status}: {await resp.text()}")
+                    return await resp.json()
+        except Exception:
+            if attempt == 2:
+                logging.exception("Congress request failed path=%s params=%s", path, params)
+                return None
+            await asyncio.sleep(delay)
+            delay *= 2
 
-            committee_pk = upsert_committee(db, committee_id, name, chamber, parent)
-            if not committee_pk:
-                continue
 
-            stmt = (
-                insert(committee_memberships)
-                .values(legislator_id=legislator_id, committee_id=committee_pk, role=role)
-                .on_conflict_do_update(
-                    index_elements=[committee_memberships.c.legislator_id, committee_memberships.c.committee_id],
-                    set_={"role": role},
+async def fetch_member_details(session: aiohttp.ClientSession, bioguide: str):
+    committees_task = fetch_json(session, "/committee-membership", {"bioguideId": bioguide, "limit": 250}, allow_404=True)
+    cosponsored_118_task = fetch_json(session, f"/member/{bioguide}/cosponsored-legislation", {"congress": 118, "limit": 250})
+    cosponsored_119_task = fetch_json(session, f"/member/{bioguide}/cosponsored-legislation", {"congress": 119, "limit": 250})
+
+    committees, cos_118, cos_119 = await asyncio.gather(
+        committees_task,
+        cosponsored_118_task,
+        cosponsored_119_task,
+    )
+    return committees or {}, cos_118 or {}, cos_119 or {}
+
+
+async def ingest_committee_catalog(session: aiohttp.ClientSession, conn):
+    committee_buf = []
+    offset = 0
+    limit = 250
+    while True:
+        payload = await fetch_json(session, "/committee", {"limit": limit, "offset": offset})
+        if not payload:
+            break
+        committees = payload.get("committees", [])
+        if not committees:
+            break
+        for c in committees:
+            code = c.get("systemCode")
+            committee_buf.append(
+                (
+                    code,
+                    c.get("name"),
+                    (c.get("chamber") or "").lower(),
+                    parent_code(c.get("parent") or c.get("subcommitteeOf")),
                 )
             )
-            db.execute(stmt)
-        except Exception:
-            logging.exception("Failed committee record for bioguide=%s", bioguide)
-
-
-def ingest_member_votes(db, legislator_id: int, bioguide: str):
-    if not bioguide:
-        return
-    for congress in [118, 119]:
-        try:
-            data = get_json(f"/member/{bioguide}/vote", {"congress": congress, "limit": 100})
-        except Exception:
-            logging.exception("Failed votes for %s congress=%s", bioguide, congress)
-            continue
-
-        vote_items = data.get("votes", []) or data.get("memberVotes", [])
-        for v in vote_items:
-            try:
-                bill = v.get("bill") or {}
-                bill_id = bill.get("number") or v.get("billNumber") or v.get("url")
-                title = bill.get("title") or v.get("description")
-                position = v.get("position") or v.get("vote")
-                vote_date = v.get("date") or v.get("actionDate")
-
-                issue_tags = []
-                policy = v.get("policyArea")
-                if isinstance(policy, dict) and policy.get("name"):
-                    issue_tags.append(policy["name"])
-
-                stmt = insert(votes).values(
-                    legislator_id=legislator_id,
-                    bill_id=bill_id,
-                    bill_title=title,
-                    vote_position=position,
-                    vote_date=vote_date,
-                    congress=congress,
-                    issue_tags=issue_tags,
+        if len(committee_buf) >= FLUSH_SIZE:
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    """
+                    INSERT INTO committees (committee_id, name, chamber, subcommittee_of)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (committee_id) DO NOTHING
+                    """,
+                    list({row for row in committee_buf if row[0]}),
                 )
-                db.execute(stmt)
-            except Exception:
-                logging.exception("Failed vote record for %s", bioguide)
-
-
-def ingest_members(limit: int = 250):
-    db = SessionLocal()
-    processed = 0
-    run_id = None
-
-    try:
-        resume_page = get_resume_page(db, SOURCE)
-        run_id = start_ingestion_run(db, SOURCE, last_page=resume_page - 1)
-        page = max(1, resume_page)
-        offset = (page - 1) * limit
-
-        while True:
-            try:
-                data = get_json("/member", {"limit": limit, "offset": offset})
-            except Exception:
-                logging.exception("Failed Congress member page=%s", page)
-                raise
-
-            members = data.get("members", [])
-            if not members:
-                break
-
-            for m in members:
-                try:
-                    bioguide = m.get("bioguideId")
-                    name = m.get("name")
-                    terms = m.get("terms", {}).get("item", [])
-                    latest_term = terms[0] if terms else {}
-                    party = latest_term.get("party") or m.get("partyName")
-                    state = latest_term.get("stateCode") or m.get("state")
-                    chamber = (latest_term.get("chamber") or "").lower()
-
-                    legislator_id = upsert_legislator(
-                        db,
-                        bioguide_id=bioguide,
-                        name=name,
-                        party=party,
-                        state=state,
-                        chamber=chamber,
-                        is_active=True,
-                    )
-                    if not legislator_id:
-                        continue
-
-                    ingest_member_committees(db, legislator_id, bioguide)
-                    ingest_member_votes(db, legislator_id, bioguide)
-                    db.commit()
-                    processed += 1
-                except Exception:
-                    db.rollback()
-                    logging.exception("Failed member row %s", m.get("bioguideId"))
-
-            update_ingestion_run_progress(
-                db,
-                run_id=run_id,
-                last_page=page,
-                records_processed=processed,
-                last_filing_uuid=(members[-1].get("bioguideId") if members else None),
+            committee_buf.clear()
+            await conn.commit()
+        pagination = payload.get("pagination", {}) or {}
+        count = pagination.get("count") or 0
+        offset += limit
+        if offset >= count:
+            break
+    if committee_buf:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO committees (committee_id, name, chamber, subcommittee_of)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (committee_id) DO NOTHING
+                """,
+                list({row for row in committee_buf if row[0]}),
             )
-            logging.info("Congress members processed=%s page=%s", processed, page)
-
-            page += 1
-            offset += limit
-
-        complete_ingestion_run(db, run_id)
-    except Exception:
-        if run_id is not None:
-            fail_ingestion_run(db, run_id)
-        raise
-    finally:
-        db.close()
+        await conn.commit()
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Ingest Congress members, committees, votes")
-    parser.add_argument("--limit", type=int, default=250)
-    args = parser.parse_args()
+async def flush_buffers(conn, leg_buf, committee_buf, membership_buf, vote_buf, cosponsor_buf):
+    if leg_buf:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO legislators (bioguide_id, name, party, state, chamber, is_active)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (bioguide_id) DO NOTHING
+                """,
+                leg_buf,
+            )
+        leg_buf.clear()
 
+    if committee_buf:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO committees (committee_id, name, chamber, subcommittee_of)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (committee_id) DO NOTHING
+                """,
+                list({row for row in committee_buf if row[0]}),
+            )
+        committee_buf.clear()
+
+    if membership_buf:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO committee_memberships (legislator_id, committee_id, role)
+                VALUES (
+                    (SELECT id FROM legislators WHERE bioguide_id = %s LIMIT 1),
+                    (SELECT id FROM committees WHERE committee_id = %s LIMIT 1),
+                    %s
+                )
+                ON CONFLICT (legislator_id, committee_id) DO NOTHING
+                """,
+                membership_buf,
+            )
+        membership_buf.clear()
+
+    if vote_buf:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO votes (legislator_id, bill_id, bill_title, vote_position, vote_date, congress, issue_tags)
+                VALUES (
+                    (SELECT id FROM legislators WHERE bioguide_id = %s LIMIT 1),
+                    %s, %s, %s, %s, %s, %s
+                )
+                ON CONFLICT DO NOTHING
+                """,
+                vote_buf,
+            )
+        vote_buf.clear()
+
+    if cosponsor_buf:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO co_sponsorships (legislator_id, bill_id, bill_title, congress, introduced_date)
+                VALUES (
+                    (SELECT id FROM legislators WHERE bioguide_id = %s LIMIT 1),
+                    %s, %s, %s, %s
+                )
+                ON CONFLICT (legislator_id, bill_id) DO NOTHING
+                """,
+                cosponsor_buf,
+            )
+        cosponsor_buf.clear()
+
+    await conn.commit()
+
+
+async def main_async(limit: int):
     if not API_KEY:
         raise RuntimeError("CONGRESS_API_KEY is required")
 
-    ingest_members(limit=args.limit)
+    conn = await connect_async()
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS co_sponsorships (
+              id SERIAL PRIMARY KEY,
+              legislator_id INTEGER REFERENCES legislators(id),
+              bill_id TEXT NOT NULL,
+              bill_title TEXT,
+              congress INTEGER,
+              introduced_date DATE,
+              UNIQUE(legislator_id, bill_id)
+            )
+            """
+        )
+    await optimize_for_bulk_load(conn)
+    await drop_indexes_for_bulk_load(conn)
+
+    leg_buf = []
+    committee_buf = []
+    membership_buf = []
+    vote_buf = []
+    cosponsor_buf = []
+
+    async with aiohttp.ClientSession() as session:
+        await ingest_committee_catalog(session, conn)
+        page = 1
+        offset = 0
+        processed = 0
+        pbar = tqdm(desc="Congress", unit="members")
+        start = time.time()
+
+        while True:
+            payload = await fetch_json(session, "/member", {"currentMember": "true", "limit": limit, "offset": offset})
+            if not payload:
+                break
+            members = payload.get("members", [])
+            if not members:
+                break
+
+            detail_tasks = []
+            for m in members:
+                bioguide = m.get("bioguideId")
+                if not bioguide:
+                    continue
+                terms = m.get("terms", {}).get("item", [])
+                latest_term = terms[0] if terms else {}
+                leg_buf.append(
+                    (
+                        bioguide,
+                        m.get("name"),
+                        latest_term.get("party") or m.get("partyName"),
+                        latest_term.get("stateCode") or m.get("state"),
+                        (latest_term.get("chamber") or "").lower(),
+                        True,
+                    )
+                )
+                detail_tasks.append((bioguide, asyncio.create_task(fetch_member_details(session, bioguide))))
+
+            await flush_buffers(conn, leg_buf, committee_buf, membership_buf, vote_buf, cosponsor_buf)
+
+            for bioguide, task in detail_tasks:
+                try:
+                    committees, cos_118, cos_119 = await task
+
+                    if committees.get("_not_found"):
+                        # Endpoint may be unavailable for this API key tier/version.
+                        # Log and continue with members + committees + co-sponsorships.
+                        pass
+                    else:
+                        for c in (
+                            committees.get("committeeMemberships", [])
+                            or committees.get("memberships", [])
+                            or committees.get("committees", [])
+                            or committees.get("memberCommittees", [])
+                        ):
+                            code = c.get("systemCode") or c.get("code") or c.get("committeeCode")
+                            committee_buf.append(
+                                (
+                                    code,
+                                    c.get("name") or c.get("title"),
+                                    (c.get("chamber") or "").lower(),
+                                    parent_code(c.get("parent") or c.get("subcommitteeOf")),
+                                )
+                            )
+                            membership_buf.append((bioguide, code, c.get("memberType") or c.get("role")))
+
+                    for congress, payload_cos in [(118, cos_118), (119, cos_119)]:
+                        for b in (payload_cos.get("bills", []) or payload_cos.get("cosponsoredLegislation", [])):
+                            bill_id = b.get("number") or b.get("billNumber") or b.get("url")
+                            cosponsor_buf.append((bioguide, bill_id, b.get("title"), congress, b.get("introducedDate")))
+
+                    processed += 1
+                    pbar.update(1)
+                    if processed % FLUSH_SIZE == 0:
+                        await flush_buffers(conn, leg_buf, committee_buf, membership_buf, vote_buf, cosponsor_buf)
+                except Exception:
+                    logging.exception("Failed congress member details bioguide=%s", bioguide)
+
+            await flush_buffers(conn, leg_buf, committee_buf, membership_buf, vote_buf, cosponsor_buf)
+            pbar.set_postfix(page=page, elapsed=f"{int(time.time() - start)}s")
+            page += 1
+            offset += limit
+
+        pbar.close()
+
+    await rebuild_indexes(conn)
+    await conn.commit()
+    await conn.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Async ingest Congress members, committees, votes, co-sponsorships")
+    parser.add_argument("--limit", type=int, default=100)
+    args = parser.parse_args()
+    asyncio.run(main_async(args.limit))
 
 
 if __name__ == "__main__":

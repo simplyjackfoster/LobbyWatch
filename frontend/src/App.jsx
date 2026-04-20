@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { fetchIssueCodes, fetchIssueGraph, fetchLegGraph, fetchOrgGraph, searchEntities } from './api'
 import Discoveries from './components/Discoveries'
@@ -7,6 +7,7 @@ import FilterBar from './components/FilterBar'
 import GraphView from './components/GraphView'
 import InfoPanel from './components/InfoPanel'
 import SearchBar from './components/SearchBar'
+import MyReps from './pages/MyReps'
 
 const seedGraph = {
   nodes: [
@@ -43,7 +44,26 @@ function resolveNodeFetchId(node, results) {
   return { kind, id: null }
 }
 
+function readRoute() {
+  return { pathname: window.location.pathname, search: window.location.search }
+}
+
+function getActiveView(pathname) {
+  if (pathname.startsWith('/explore')) return 'graph'
+  if (pathname.startsWith('/discoveries')) return 'discoveries'
+  if (pathname.startsWith('/my-reps')) return 'my-reps'
+  if (pathname.startsWith('/rep/')) return 'my-reps'
+  return 'my-reps'
+}
+
+function getSharedBioguide(pathname) {
+  const match = pathname.match(/^\/rep\/([^/]+)$/)
+  if (!match) return null
+  return decodeURIComponent(match[1])
+}
+
 export default function App() {
+  const [route, setRoute] = useState(() => readRoute())
   const [results, setResults] = useState([])
   const [graph, setGraph] = useState(seedGraph)
   const [selectedNode, setSelectedNode] = useState(null)
@@ -52,10 +72,36 @@ export default function App() {
   const [issueCodes, setIssueCodes] = useState([])
   const [graphLoading, setGraphLoading] = useState(false)
   const [loadingNodeId, setLoadingNodeId] = useState(null)
-  const [tab, setTab] = useState('graph')
   const headerRef = useRef(null)
   const navRef = useRef(null)
   const filterRef = useRef(null)
+  const lastRouteLegislatorRef = useRef(null)
+
+  const activeView = useMemo(() => getActiveView(route.pathname), [route.pathname])
+  const sharedBioguideId = useMemo(() => getSharedBioguide(route.pathname), [route.pathname])
+
+  const navigate = useCallback((nextPath, { replace = false } = {}) => {
+    const current = `${window.location.pathname}${window.location.search}`
+    if (current === nextPath) return
+    if (replace) {
+      window.history.replaceState({}, '', nextPath)
+    } else {
+      window.history.pushState({}, '', nextPath)
+    }
+    setRoute(readRoute())
+  }, [])
+
+  useEffect(() => {
+    if (window.location.pathname === '/') {
+      navigate('/my-reps', { replace: true })
+    }
+  }, [navigate])
+
+  useEffect(() => {
+    const onPop = () => setRoute(readRoute())
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
 
   useEffect(() => {
     fetchIssueCodes()
@@ -86,7 +132,26 @@ export default function App() {
       resizeObserver.disconnect()
       window.removeEventListener('resize', updateLayoutVars)
     }
-  }, [tab])
+  }, [activeView])
+
+  useEffect(() => {
+    if (activeView !== 'graph' || route.pathname !== '/explore') return
+    const params = new URLSearchParams(route.search)
+    const legislator = params.get('legislator')
+    if (!legislator) {
+      lastRouteLegislatorRef.current = null
+      return
+    }
+    if (lastRouteLegislatorRef.current === legislator) return
+    lastRouteLegislatorRef.current = legislator
+
+    setSelectedNode(null)
+    setSelectedEntity(null)
+    setGraphLoading(true)
+    fetchLegGraph(legislator, filters)
+      .then((payload) => setGraph(payload))
+      .finally(() => setGraphLoading(false))
+  }, [activeView, route.pathname, route.search, filters])
 
   const onSearch = useCallback(async (q) => {
     const data = await searchEntities(q)
@@ -94,6 +159,9 @@ export default function App() {
   }, [])
 
   const onSelectResult = useCallback(async (result) => {
+    if (activeView !== 'graph' || route.pathname !== '/explore') {
+      navigate('/explore')
+    }
     setSelectedEntity(result)
     setSelectedNode(null)
     setLoadingNodeId(null)
@@ -111,7 +179,7 @@ export default function App() {
     } finally {
       setGraphLoading(false)
     }
-  }, [filters])
+  }, [activeView, route.pathname, navigate, filters])
 
   const onNodeClick = useCallback(async (node) => {
     setSelectedNode(node)
@@ -155,7 +223,7 @@ export default function App() {
   }, [filters])
 
   const onDiscoveryViewGraph = useCallback(async (finding) => {
-    setTab('graph')
+    navigate('/explore')
     setSelectedNode(null)
     setLoadingNodeId(null)
     setGraphLoading(true)
@@ -196,7 +264,12 @@ export default function App() {
     } finally {
       setGraphLoading(false)
     }
-  }, [filters])
+  }, [navigate, filters])
+
+  const onMyRepsViewNetwork = useCallback((rep) => {
+    if (!rep?.bioguide_id) return
+    navigate(`/explore?legislator=${encodeURIComponent(rep.bioguide_id)}`)
+  }, [navigate])
 
   return (
     <div className="app-shell">
@@ -220,23 +293,35 @@ export default function App() {
       <nav className="nav-tabs nav" ref={navRef} role="tablist" aria-label="Primary views">
         <button
           role="tab"
-          aria-selected={tab === 'graph'}
-          className={tab === 'graph' ? 'active' : ''}
-          onClick={() => setTab('graph')}
+          aria-selected={activeView === 'my-reps'}
+          className={activeView === 'my-reps' ? 'active' : ''}
+          onClick={() => navigate('/my-reps')}
         >
-          Explore
+          MY REPS
         </button>
         <button
           role="tab"
-          aria-selected={tab === 'discoveries'}
-          className={tab === 'discoveries' ? 'active' : ''}
-          onClick={() => setTab('discoveries')}
+          aria-selected={activeView === 'graph'}
+          className={activeView === 'graph' ? 'active' : ''}
+          onClick={() => navigate('/explore')}
         >
-          Discoveries
+          EXPLORE
+        </button>
+        <button
+          role="tab"
+          aria-selected={activeView === 'discoveries'}
+          className={activeView === 'discoveries' ? 'active' : ''}
+          onClick={() => navigate('/discoveries')}
+        >
+          DISCOVERIES
         </button>
       </nav>
 
-      {tab === 'graph' && (
+      {activeView === 'my-reps' && (
+        <MyReps sharedBioguideId={sharedBioguideId} onViewNetwork={onMyRepsViewNetwork} />
+      )}
+
+      {activeView === 'graph' && (
         <section className="explore-view">
           <SearchBar onSearch={onSearch} results={results} onSelect={onSelectResult} />
           <FilterBar ref={filterRef} onChange={onFilterApply} issueCodes={issueCodes} />
@@ -255,7 +340,7 @@ export default function App() {
         </section>
       )}
 
-      {tab === 'discoveries' && <Discoveries onViewGraph={onDiscoveryViewGraph} />}
+      {activeView === 'discoveries' && <Discoveries onViewGraph={onDiscoveryViewGraph} />}
     </div>
   )
 }

@@ -22,7 +22,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://lobbying:lobbying@db:5432/lobbying}
+      DATABASE_URL: postgresql://lobbywatch:lobbywatch@db:5432/lobbywatch
     ports:
       - "8000:8000"
     depends_on:

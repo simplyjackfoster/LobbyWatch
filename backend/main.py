@@ -1,6 +1,13 @@
+import json
+import os
+import re
+from difflib import SequenceMatcher
 from typing import Optional
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -8,6 +15,61 @@ from sqlalchemy.orm import Session
 from graph import get_entity_summary, get_issue_graph, get_legislator_graph, get_organization_graph
 from models import SessionLocal
 from search import search_entities
+
+CONGRESS_API_KEY = os.getenv("CONGRESS_API_KEY")
+GOOGLE_CIVIC_API_KEY = os.getenv("GOOGLE_CIVIC_API_KEY")
+PERSON_TITLE_RE = re.compile(r"^(SEN(?:ATOR)?|REP(?:RESENTATIVE)?|CONGRESS(?:MAN|WOMAN)?)[\.\s]+", re.IGNORECASE)
+NON_WORD_RE = re.compile(r"[^A-Z0-9\s]")
+INDUSTRY_LABELS = {
+    "HLTH": "Health & Pharma",
+    "FIN": "Finance",
+    "REAL": "Real Estate",
+    "ENRG": "Energy",
+    "TECH": "Technology",
+    "DEF": "Defense",
+    "AGR": "Agriculture",
+    "TRAN": "Transportation",
+}
+STATE_CODE_BY_NAME = {
+    "ALABAMA": "AL", "ALASKA": "AK", "ARIZONA": "AZ", "ARKANSAS": "AR", "CALIFORNIA": "CA",
+    "COLORADO": "CO", "CONNECTICUT": "CT", "DELAWARE": "DE", "FLORIDA": "FL", "GEORGIA": "GA",
+    "HAWAII": "HI", "IDAHO": "ID", "ILLINOIS": "IL", "INDIANA": "IN", "IOWA": "IA",
+    "KANSAS": "KS", "KENTUCKY": "KY", "LOUISIANA": "LA", "MAINE": "ME", "MARYLAND": "MD",
+    "MASSACHUSETTS": "MA", "MICHIGAN": "MI", "MINNESOTA": "MN", "MISSISSIPPI": "MS", "MISSOURI": "MO",
+    "MONTANA": "MT", "NEBRASKA": "NE", "NEVADA": "NV", "NEW HAMPSHIRE": "NH", "NEW JERSEY": "NJ",
+    "NEW MEXICO": "NM", "NEW YORK": "NY", "NORTH CAROLINA": "NC", "NORTH DAKOTA": "ND", "OHIO": "OH",
+    "OKLAHOMA": "OK", "OREGON": "OR", "PENNSYLVANIA": "PA", "RHODE ISLAND": "RI", "SOUTH CAROLINA": "SC",
+    "SOUTH DAKOTA": "SD", "TENNESSEE": "TN", "TEXAS": "TX", "UTAH": "UT", "VERMONT": "VT",
+    "VIRGINIA": "VA", "WASHINGTON": "WA", "WEST VIRGINIA": "WV", "WISCONSIN": "WI", "WYOMING": "WY",
+    "DISTRICT OF COLUMBIA": "DC",
+}
+ISSUE_TO_INDUSTRY = {
+    "HLTH": "HLTH",
+    "PHARM": "HLTH",
+    "FIN": "FIN",
+    "BANK": "FIN",
+    "TAX": "FIN",
+    "REAL": "REAL",
+    "HOUS": "REAL",
+    "ENRG": "ENRG",
+    "ENER": "ENRG",
+    "TECH": "TECH",
+    "DEF": "DEF",
+    "AGR": "AGR",
+    "TRAN": "TRAN",
+}
+ZIP_FALLBACK = {
+    "19401": ["F000479", "F000466"],
+    "10001": ["S000148", "G000555", "N000002"],
+    "90001": ["P000197", "P000145", "B001300"],
+    "60601": ["D000563", "D000622", "C001126"],
+    "30301": ["W000790", "O000174", "N000026"],
+    "77001": ["C001098", "C001056", "N000060"],
+    "33101": ["S001191", "R000595", "B001287"],
+    "02108": ["W000817", "M000133", "L000602"],
+    "98101": ["M001176", "C001075", "J000298"],
+    "80202": ["B001267", "H001052", "D000216"],
+}
 
 app = FastAPI(title="LobbyWatch API", version="0.1.0")
 
@@ -57,6 +119,490 @@ def compute_issue_relevance(
         if mapped and issue_codes.intersection(mapped):
             relevance += 0.5
     return relevance
+
+
+def normalize_person_name(name: str) -> str:
+    value = (name or "").upper().strip()
+    value = PERSON_TITLE_RE.sub("", value)
+    value = NON_WORD_RE.sub(" ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
+
+
+def normalize_state_code(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    text_value = str(value).strip().upper()
+    if len(text_value) == 2:
+        return text_value
+    return STATE_CODE_BY_NAME.get(text_value, text_value)
+
+
+def normalize_chamber(value: Optional[str]) -> str:
+    raw = str(value or "").strip().lower()
+    if "senate" in raw:
+        return "senate"
+    if "house" in raw:
+        return "house"
+    return raw
+
+
+def split_title_and_name(name: str, chamber: Optional[str]) -> tuple[str, str]:
+    clean = (name or "").strip()
+    title = "Sen." if (chamber or "").lower() == "senate" else "Rep."
+    if clean.upper().startswith("SEN. "):
+        title = "Sen."
+        clean = clean[5:]
+    elif clean.upper().startswith("REP. "):
+        title = "Rep."
+        clean = clean[5:]
+    return title, clean.strip()
+
+
+def reorder_last_first(name: str) -> str:
+    raw = (name or "").strip()
+    if "," not in raw:
+        return raw
+    parts = [part.strip() for part in raw.split(",", 1)]
+    if len(parts) != 2:
+        return raw
+    return f"{parts[1]} {parts[0]}".strip()
+
+
+def fetch_json_from_url(url: str, timeout: int = 10) -> dict:
+    req = urllib_request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "LobbyWatch/1.0",
+        },
+    )
+    with urllib_request.urlopen(req, timeout=timeout) as resp:
+        payload = resp.read().decode("utf-8", errors="replace")
+        return json.loads(payload)
+
+
+def fetch_congress_members_by_zip(zipcode: str) -> list[dict]:
+    params = {"zip": zipcode}
+    if CONGRESS_API_KEY:
+        params["api_key"] = CONGRESS_API_KEY
+    url = f"https://api.congress.gov/v3/member?{urllib_parse.urlencode(params)}"
+    try:
+        payload = fetch_json_from_url(url)
+    except Exception:
+        return []
+
+    members = payload.get("members") or payload.get("results") or []
+    parsed = []
+    for member in members:
+        if not isinstance(member, dict):
+            continue
+        name = reorder_last_first(member.get("name") or "")
+        chamber = normalize_chamber(member.get("chamber"))
+        title, display_name = split_title_and_name(name, chamber)
+        if not display_name:
+            continue
+        parsed.append(
+            {
+                "name": display_name,
+                "title": title,
+                "party": member.get("party"),
+                "state": normalize_state_code(member.get("state")),
+                "chamber": chamber,
+            }
+        )
+    return parsed
+
+
+def parse_state_from_division_id(division_id: str) -> Optional[str]:
+    if not division_id:
+        return None
+    match = re.search(r"/state:([a-z]{2})", division_id, re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).upper()
+
+
+def fetch_google_civic_members_by_zip(zipcode: str) -> list[dict]:
+    if not GOOGLE_CIVIC_API_KEY:
+        return []
+
+    params = {
+        "address": zipcode,
+        "levels": "country",
+        "roles": "legislatorUpperBody,legislatorLowerBody",
+        "key": GOOGLE_CIVIC_API_KEY,
+    }
+    url = f"https://www.googleapis.com/civicinfo/v2/representatives?{urllib_parse.urlencode(params)}"
+    try:
+        payload = fetch_json_from_url(url)
+    except Exception:
+        return []
+
+    offices = payload.get("offices") or []
+    officials = payload.get("officials") or []
+    parsed = []
+    for office in offices:
+        if not isinstance(office, dict):
+            continue
+        roles = office.get("roles") or []
+        levels = office.get("levels") or []
+        if "country" not in levels:
+            continue
+        if "legislatorUpperBody" in roles:
+            chamber = "senate"
+        elif "legislatorLowerBody" in roles:
+            chamber = "house"
+        else:
+            continue
+
+        division_state = normalize_state_code(parse_state_from_division_id(office.get("divisionId") or ""))
+        for idx in office.get("officialIndices") or []:
+            if not isinstance(idx, int):
+                continue
+            if idx < 0 or idx >= len(officials):
+                continue
+            official = officials[idx]
+            if not isinstance(official, dict):
+                continue
+
+            name = reorder_last_first(official.get("name") or "")
+            title, display_name = split_title_and_name(name, chamber)
+            if not display_name:
+                continue
+            parsed.append(
+                {
+                    "name": display_name,
+                    "title": title,
+                    "party": official.get("party"),
+                    "state": division_state,
+                    "chamber": chamber,
+                }
+            )
+
+    unique = []
+    seen = set()
+    for row in parsed:
+        key = (normalize_person_name(row.get("name") or ""), row.get("chamber"), row.get("state"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique
+
+
+def fetch_legislators_by_bioguide_ids(db: Session, bioguide_ids: list[str]) -> list[dict]:
+    if not bioguide_ids:
+        return []
+    rows = db.execute(
+        text(
+            """
+            SELECT id, bioguide_id, name, party, state, chamber
+            FROM legislators
+            WHERE bioguide_id = ANY(:ids)
+            """
+        ),
+        {"ids": bioguide_ids},
+    ).all()
+    by_id = {row.bioguide_id: row for row in rows}
+    ordered = []
+    for bid in bioguide_ids:
+        row = by_id.get(bid)
+        if not row:
+            continue
+        ordered.append(
+            {
+                "id": row.id,
+                "bioguide_id": row.bioguide_id,
+                "name": row.name,
+                "party": row.party,
+                "state": row.state,
+                "chamber": normalize_chamber(row.chamber),
+            }
+        )
+    return ordered
+
+
+def build_betrayal_map(db: Session) -> dict[str, dict]:
+    payload = betrayal_index(issue_code="HLTH", min_contribution=10000, contribution_window_days=365, db=db)
+    return {
+        normalize_person_name(row["legislator"]["name"]): {
+            "betrayal_score": row.get("betrayal_score"),
+            "issue_code": "HLTH",
+        }
+        for row in payload.get("findings", [])
+    }
+
+
+def fallback_candidates_for_zip(db: Session, zipcode: str) -> list[dict]:
+    ids = ZIP_FALLBACK.get(zipcode, [])
+    return fetch_legislators_by_bioguide_ids(db, ids)
+
+
+def ranked_legislator_matches(db: Session, candidates: list[dict]) -> tuple[list[dict], list[dict]]:
+    matched = []
+    unmatched = []
+    seen_bioguide = set()
+    for candidate in candidates:
+        legislator = lookup_legislator(db, candidate)
+        if not legislator:
+            unmatched.append({"name": candidate.get("name"), "state": candidate.get("state"), "chamber": candidate.get("chamber")})
+            continue
+        if legislator["bioguide_id"] in seen_bioguide:
+            continue
+        seen_bioguide.add(legislator["bioguide_id"])
+        matched.append(legislator)
+    return matched, unmatched
+
+
+def lookup_legislator(db: Session, candidate: dict) -> Optional[dict]:
+    state = normalize_state_code(candidate.get("state"))
+    chamber = normalize_chamber(candidate.get("chamber")) or None
+    candidate_party = str(candidate.get("party") or "").strip().upper()
+    if candidate_party.startswith("D"):
+        candidate_party = "D"
+    elif candidate_party.startswith("R"):
+        candidate_party = "R"
+    elif candidate_party.startswith("I"):
+        candidate_party = "I"
+    else:
+        candidate_party = ""
+    rows = db.execute(
+        text(
+            """
+            SELECT id, bioguide_id, name, party, state, chamber
+            FROM legislators
+            WHERE is_active = TRUE
+              AND (CAST(:state AS text) IS NULL OR state = CAST(:state AS text))
+              AND (CAST(:chamber AS text) IS NULL OR LOWER(chamber) = CAST(:chamber AS text))
+            """
+        ),
+        {"state": state, "chamber": chamber},
+    ).all()
+    if not rows:
+        rows = db.execute(
+            text(
+                """
+                SELECT id, bioguide_id, name, party, state, chamber
+                FROM legislators
+                WHERE is_active = TRUE
+                """
+            )
+        ).all()
+
+    cand_norm = normalize_person_name(reorder_last_first(candidate.get("name") or ""))
+    suffixes = {"JR", "SR", "II", "III", "IV", "V"}
+    cand_parts = cand_norm.split()
+    while cand_parts and cand_parts[-1] in suffixes:
+        cand_parts.pop()
+    cand_tokens = set(cand_parts)
+    cand_last = cand_parts[-1] if cand_parts else ""
+    best = None
+    best_score = 0.0
+
+    for row in rows:
+        row_norm = normalize_person_name(reorder_last_first(row.name or ""))
+        row_parts = row_norm.split()
+        while row_parts and row_parts[-1] in suffixes:
+            row_parts.pop()
+        row_tokens = set(row_parts)
+        row_last = row_parts[-1] if row_parts else ""
+        if not row_norm:
+            continue
+        if cand_last and row_last and cand_last != row_last:
+            continue
+        if candidate_party:
+            row_party = str(row.party or "").strip().upper()
+            if not row_party.startswith(candidate_party):
+                continue
+
+        ratio = SequenceMatcher(None, cand_norm, row_norm).ratio()
+        overlap = (len(cand_tokens.intersection(row_tokens)) / max(len(cand_tokens), 1)) if cand_tokens else 0.0
+        score = (ratio * 0.7) + (overlap * 0.3)
+        if cand_last and cand_last in row_tokens:
+            score += 0.08
+        if chamber and str(row.chamber or "").lower() == chamber:
+            score += 0.05
+
+        if score > best_score:
+            best_score = score
+            best = row
+
+    if not best or best_score < 0.5:
+        return None
+    return {
+        "id": best.id,
+        "bioguide_id": best.bioguide_id,
+        "name": best.name,
+        "party": best.party,
+        "state": best.state,
+        "chamber": str(best.chamber or "").lower(),
+    }
+
+
+def build_representative_payload(
+    db: Session,
+    legislator: dict,
+    betrayal_by_name: dict[str, dict],
+) -> dict:
+    leg_id = legislator["id"]
+    bioguide_id = legislator["bioguide_id"]
+    summary = get_entity_summary(db, entity_type="legislator", entity_id=bioguide_id)
+
+    industry_rows = db.execute(
+        text(
+            """
+            SELECT COALESCE(o.industry_code, 'OTHER') AS industry_code, SUM(c.amount) AS total
+            FROM contributions c
+            JOIN organizations o ON o.id = c.contributor_org_id
+            WHERE c.recipient_legislator_id = :legislator_id
+            GROUP BY COALESCE(o.industry_code, 'OTHER')
+            ORDER BY total DESC
+            LIMIT 5
+            """
+        ),
+        {"legislator_id": leg_id},
+    ).all()
+    top_industries = [
+        {
+            "industry_code": row.industry_code,
+            "label": INDUSTRY_LABELS.get(row.industry_code, row.industry_code),
+            "total": float(row.total or 0),
+        }
+        for row in industry_rows
+    ]
+
+    vote_rows = db.execute(
+        text(
+            """
+            SELECT
+              bill_id,
+              bill_title,
+              vote_position AS position,
+              vote_date::text AS date,
+              COALESCE((issue_tags)[1], '') AS issue_code
+            FROM votes
+            WHERE legislator_id = :legislator_id
+            ORDER BY vote_date DESC NULLS LAST, id DESC
+            LIMIT 20
+            """
+        ),
+        {"legislator_id": leg_id},
+    ).all()
+    recent_votes = [
+        {
+            "bill_id": row.bill_id,
+            "bill_title": row.bill_title,
+            "position": row.position,
+            "date": row.date,
+            "issue_code": row.issue_code or None,
+        }
+        for row in vote_rows
+    ]
+
+    co_count = int(
+        db.execute(
+            text("SELECT COUNT(*) FROM co_sponsorships WHERE legislator_id = :legislator_id"),
+            {"legislator_id": leg_id},
+        ).scalar()
+        or 0
+    )
+    co_by_issue = []
+    try:
+        co_issue_rows = db.execute(
+            text(
+                """
+                SELECT COALESCE(issue_code, 'OTHER') AS issue_code, COUNT(*) AS count
+                FROM co_sponsorships
+                WHERE legislator_id = :legislator_id
+                GROUP BY COALESCE(issue_code, 'OTHER')
+                ORDER BY count DESC
+                LIMIT 10
+                """
+            ),
+            {"legislator_id": leg_id},
+        ).all()
+        co_by_issue = [{"issue_code": row.issue_code, "count": int(row.count or 0)} for row in co_issue_rows]
+    except Exception:
+        db.rollback()
+        co_by_issue = []
+
+    committee_ids = db.execute(
+        text("SELECT committee_id FROM committee_memberships WHERE legislator_id = :legislator_id"),
+        {"legislator_id": leg_id},
+    ).scalars().all()
+
+    total_lobbying_filings_on_committees = 0
+    lobbying_spend_on_committees = 0.0
+    if committee_ids:
+        member_ids = db.execute(
+            text(
+                """
+                SELECT DISTINCT legislator_id
+                FROM committee_memberships
+                WHERE committee_id = ANY(:committee_ids)
+                """
+            ),
+            {"committee_ids": committee_ids},
+        ).scalars().all()
+        if member_ids:
+            filings_row = db.execute(
+                text(
+                    """
+                    SELECT
+                      COUNT(DISTINCT lr.id) AS filing_count,
+                      COALESCE(SUM(lr.amount), 0) AS total_amount
+                    FROM lobbying_registrations lr
+                    JOIN contributions c ON c.contributor_org_id = lr.client_id
+                    WHERE c.recipient_legislator_id = ANY(:member_ids)
+                    """
+                ),
+                {"member_ids": member_ids},
+            ).first()
+            if filings_row:
+                total_lobbying_filings_on_committees = int(filings_row.filing_count or 0)
+                lobbying_spend_on_committees = float(filings_row.total_amount or 0)
+
+    support_positions = {"YEA", "AYE", "YES"}
+    oppose_positions = {"NAY", "NO", "NOT VOTING"}
+    support_count = 0
+    oppose_count = 0
+    for vote in recent_votes:
+        position = str(vote.get("position") or "").upper()
+        if position in support_positions:
+            support_count += 1
+        if position in oppose_positions:
+            oppose_count += 1
+    vote_alignment_score = support_count / max(support_count + oppose_count, 1)
+
+    betrayal = betrayal_by_name.get(normalize_person_name(legislator.get("name") or ""))
+    betrayal_score = float((betrayal or {}).get("betrayal_score") or 0)
+    betrayal_issue = (betrayal or {}).get("issue_code") or "HLTH"
+
+    title = "Sen." if legislator.get("chamber") == "senate" else "Rep."
+    first_letter = (bioguide_id or "X")[0].upper()
+    photo_url = f"https://bioguide.congress.gov/bioguide/photo/{first_letter}/{bioguide_id}.jpg"
+
+    return {
+        "bioguide_id": bioguide_id,
+        "name": legislator.get("name"),
+        "title": title,
+        "party": legislator.get("party"),
+        "state": normalize_state_code(legislator.get("state")),
+        "chamber": legislator.get("chamber"),
+        "photo_url": photo_url,
+        "committees": summary.get("committees", []),
+        "top_industries": top_industries,
+        "total_contributions_received": float(summary.get("total_contributions_received") or 0),
+        "total_lobbying_filings_on_committees": total_lobbying_filings_on_committees,
+        "vote_alignment_score": round(vote_alignment_score, 2),
+        "betrayal_score": round(betrayal_score, 2),
+        "betrayal_issue": betrayal_issue,
+        "recent_votes": recent_votes,
+        "co_sponsorships_count": co_count,
+        "co_sponsorships_by_issue": co_by_issue,
+        "lobbying_spend_on_committees": lobbying_spend_on_committees,
+    }
 
 
 @app.get("/health")
@@ -150,6 +696,83 @@ def entity_summary(entity_type: str, entity_id: str, db: Session = Depends(get_d
     return get_entity_summary(db, entity_type=entity_type, entity_id=entity_id)
 
 
+@app.get("/representatives")
+def representatives(
+    zip: Optional[str] = Query(default=None, min_length=5, max_length=5),
+    bioguide_id: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    if not zip and not bioguide_id:
+        raise HTTPException(status_code=400, detail="zip or bioguide_id is required")
+    if zip and not re.fullmatch(r"\d{5}", zip):
+        raise HTTPException(status_code=400, detail="zip must be 5 digits")
+
+    candidates: list[dict] = []
+    if bioguide_id:
+        leg_row = db.execute(
+            text(
+                """
+                SELECT id, bioguide_id, name, party, state, LOWER(chamber) AS chamber
+                FROM legislators
+                WHERE bioguide_id = :bioguide_id
+                LIMIT 1
+                """
+            ),
+            {"bioguide_id": bioguide_id},
+        ).first()
+        if not leg_row:
+            return {"zip": zip, "representatives": [], "unmatched": [{"bioguide_id": bioguide_id}]}
+        betrayal_by_name = build_betrayal_map(db)
+        legislator = {
+            "id": leg_row.id,
+            "bioguide_id": leg_row.bioguide_id,
+            "name": leg_row.name,
+            "party": leg_row.party,
+            "state": normalize_state_code(leg_row.state),
+            "chamber": normalize_chamber(leg_row.chamber),
+        }
+        return {"zip": zip, "representatives": [build_representative_payload(db, legislator, betrayal_by_name)], "unmatched": []}
+    else:
+        candidates = fetch_congress_members_by_zip(zip)
+        if len(candidates) > 5 or len(candidates) < 1:
+            candidates = []
+        if not candidates:
+            candidates = fetch_google_civic_members_by_zip(zip)
+
+        fallback_rows = []
+        if not candidates:
+            fallback_rows = fallback_candidates_for_zip(db, zip)
+            if fallback_rows:
+                candidates = [
+                    {
+                        "name": row["name"],
+                        "party": row["party"],
+                        "state": normalize_state_code(row["state"]),
+                        "chamber": normalize_chamber(row["chamber"]),
+                    }
+                    for row in fallback_rows
+                ]
+        if not candidates:
+            return {"zip": zip, "representatives": [], "unmatched": []}
+
+    betrayal_by_name = build_betrayal_map(db)
+    if fallback_rows:
+        matched = [build_representative_payload(db, row, betrayal_by_name) for row in fallback_rows]
+        unmatched = []
+    else:
+        matched_rows, unmatched = ranked_legislator_matches(db, candidates)
+        matched = [build_representative_payload(db, legislator, betrayal_by_name) for legislator in matched_rows]
+
+    chamber_order = {"senate": 0, "house": 1}
+    matched.sort(key=lambda rep: (chamber_order.get(rep.get("chamber"), 2), rep.get("name") or ""))
+
+    return {
+        "zip": zip,
+        "representatives": matched,
+        "unmatched": unmatched,
+    }
+
+
 @app.get("/analysis/betrayal-index")
 def betrayal_index(
     issue_code: str = Query(default="HLTH"),
@@ -201,7 +824,7 @@ def betrayal_index(
                 WHERE c.recipient_legislator_id = :legislator_id
                   AND :issue_code = ANY(lr.general_issue_codes)
                   AND c.contribution_date >= cs.introduced_date
-                  AND c.contribution_date <= cs.introduced_date + (:window_days::text || ' days')::interval
+                  AND c.contribution_date <= cs.introduced_date + (INTERVAL '1 day' * :window_days)
                 GROUP BY o.name
                 ORDER BY amount DESC
                 """

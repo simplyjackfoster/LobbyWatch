@@ -51,3 +51,8 @@ export async function fetchForeignInfluence(params = {}) {
   const { data } = await client.get('/analysis/foreign-influence', { params })
   return data
 }
+
+export async function fetchRepresentatives(params = {}) {
+  const { data } = await client.get('/representatives', { params })
+  return data
+}
