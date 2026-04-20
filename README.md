@@ -13,7 +13,7 @@ It combines:
 - Python 3.11+
 - Node.js 18+
 - API keys:
-1. Senate LDA API key: [https://lda.senate.gov/api/](https://lda.senate.gov/api/)
+1. Senate LDA API key: [https://lda.gov/api/](https://lda.gov/api/)
 2. OpenFEC API key (Data.gov): [https://api.data.gov/signup/](https://api.data.gov/signup/)
 3. Congress.gov API key: [https://api.congress.gov/sign-up/](https://api.congress.gov/sign-up/)
 
@@ -54,16 +54,21 @@ psql "$DATABASE_URL" -f pipeline/002_fts_and_issues.sql
 pip install -r pipeline/requirements.txt
 ```
 
-6. Run ingestion in order (recommended first pass scope):
+6. Run ingestion in order:
 ```bash
-python pipeline/ingest_lda.py --year-start 2024 --year-end 2024 --period first_quarter
-python pipeline/ingest_congress.py --limit 100
-python pipeline/ingest_fec.py --cycles 2024
+python3 pipeline/ingest_congress.py
+python3 pipeline/ingest_lda.py --years 2023 2024 2025
+python3 pipeline/dedup_orgs.py
+python3 pipeline/ingest_fec.py --cycles 2024 --min-amount 1000
+python3 pipeline/ingest_lda_contributions.py --years 2023 2024 2025
+python3 pipeline/rebuild_indexes.py
 ```
 
-7. Run post-ingestion deduplication:
+7. New analysis endpoints:
 ```bash
-python pipeline/dedup_orgs.py
+GET /analysis/betrayal-index?issue_code=HLTH
+GET /analysis/revolving-door?agency=FDA
+GET /analysis/foreign-influence?country=CN
 ```
 
 8. Start full stack:
@@ -74,6 +79,9 @@ docker compose up --build
 9. Open the app:
 - Frontend: `http://localhost:5173`
 - Backend API: `http://localhost:8000`
+
+The LDA API migrated from `lda.senate.gov` to `lda.gov` in 2026.  
+All pipeline code uses `lda.gov/api/v1/` as of this version.
 
 ## Ingestion Run Tracking
 

@@ -3,6 +3,7 @@ import re
 from typing import Optional
 
 from dotenv import load_dotenv
+import psycopg
 from sqlalchemy import MetaData, Table, create_engine, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import sessionmaker
@@ -261,3 +262,132 @@ def fail_ingestion_run(db, run_id: int):
         {"run_id": run_id},
     )
     db.commit()
+
+
+def raw_database_url() -> str:
+    return DATABASE_URL.replace("postgresql+psycopg://", "postgresql://")
+
+
+async def connect_async():
+    return await psycopg.AsyncConnection.connect(raw_database_url(), autocommit=False)
+
+
+async def optimize_for_bulk_load(conn):
+    await conn.execute("SET synchronous_commit = OFF")
+    await conn.execute("SET work_mem = '256MB'")
+    await conn.execute("SET maintenance_work_mem = '512MB'")
+
+
+async def drop_indexes_for_bulk_load(conn):
+    indexes = [
+        "idx_specific_issues_fts",
+        "idx_general_issue_codes",
+        "idx_org_name_normalized",
+        "idx_contributions_contributor",
+        "idx_contributions_recipient",
+        "idx_lobbying_client",
+        "idx_lobbying_registrant",
+    ]
+    for idx in indexes:
+        await conn.execute(f"DROP INDEX IF EXISTS {idx}")
+
+
+async def rebuild_indexes(conn):
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_org_name_normalized
+        ON organizations(name_normalized);
+
+        CREATE INDEX IF NOT EXISTS idx_lobbying_client
+        ON lobbying_registrations(client_id);
+
+        CREATE INDEX IF NOT EXISTS idx_lobbying_registrant
+        ON lobbying_registrations(registrant_id);
+
+        CREATE INDEX IF NOT EXISTS idx_contributions_contributor
+        ON contributions(contributor_org_id);
+
+        CREATE INDEX IF NOT EXISTS idx_contributions_recipient
+        ON contributions(recipient_legislator_id);
+        """
+    )
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_general_issue_codes
+        ON lobbying_registrations USING GIN (general_issue_codes);
+        """
+    )
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_specific_issues_fts
+        ON lobbying_registrations USING GIN (specific_issues_tsv);
+        """
+    )
+
+
+async def apply_enhancement_migrations(conn):
+    async with conn.transaction():
+        await conn.execute(
+            """
+            ALTER TABLE lobbyists
+              ADD COLUMN IF NOT EXISTS covered_positions TEXT[],
+              ADD COLUMN IF NOT EXISTS has_covered_position BOOLEAN DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS conviction_disclosure TEXT,
+              ADD COLUMN IF NOT EXISTS has_conviction BOOLEAN DEFAULT FALSE;
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_lobbyists_covered_position
+              ON lobbyists(has_covered_position)
+              WHERE has_covered_position = TRUE;
+            """
+        )
+
+        await conn.execute(
+            """
+            ALTER TABLE lobbying_registrations
+              ADD COLUMN IF NOT EXISTS has_foreign_entity BOOLEAN DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS foreign_entity_names TEXT[],
+              ADD COLUMN IF NOT EXISTS foreign_entity_countries TEXT[];
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_foreign_entity_filings
+              ON lobbying_registrations(has_foreign_entity)
+              WHERE has_foreign_entity = TRUE;
+            """
+        )
+
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS lobbyist_contributions (
+              id SERIAL PRIMARY KEY,
+              filing_uuid TEXT UNIQUE NOT NULL,
+              lobbyist_id INTEGER REFERENCES lobbyists(id),
+              registrant_id INTEGER REFERENCES organizations(id),
+              filing_year INTEGER,
+              filing_period TEXT,
+              contribution_items JSONB,
+              pacs TEXT[],
+              dt_posted DATE
+            );
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_lobbyist_contributions_lobbyist
+              ON lobbyist_contributions(lobbyist_id);
+            """
+        )
+        await conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_lobbyist_contributions_year
+              ON lobbyist_contributions(filing_year);
+            """
+        )
+
+
+async def apply_migrations(conn):
+    await apply_enhancement_migrations(conn)

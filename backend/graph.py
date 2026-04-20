@@ -101,18 +101,36 @@ def get_organization_graph(
         reg_node = f"reg-{r.id}"
         if not g.add_node(reg_node, f"Filing {r.filing_uuid[:8]}", "registration", amount=float(r.amount or 0), filing_year=r.filing_year):
             break
-        g.add_edge(f"org-{org.id}", reg_node, "filed_or_targeted")
+        g.add_edge(
+            f"org-{org.id}",
+            reg_node,
+            "filed_or_targeted",
+            has_foreign_entity=bool(r.has_foreign_entity),
+            foreign_countries=r.foreign_entity_countries or [],
+        )
         for issue in r.issue_codes or []:
             issue_tags.add(issue)
 
         if r.registrant_id and r.registrant_id != org.id:
             registrant = db.get(Organization, r.registrant_id)
             if registrant and g.add_node(f"org-{registrant.id}", registrant.name, "organization", subtype=registrant.type):
-                g.add_edge(f"org-{registrant.id}", reg_node, "registrant")
+                g.add_edge(
+                    f"org-{registrant.id}",
+                    reg_node,
+                    "registrant",
+                    has_foreign_entity=bool(r.has_foreign_entity),
+                    foreign_countries=r.foreign_entity_countries or [],
+                )
         if r.client_id and r.client_id != org.id:
             client = db.get(Organization, r.client_id)
             if client and g.add_node(f"org-{client.id}", client.name, "organization", subtype=client.type):
-                g.add_edge(f"org-{client.id}", reg_node, "client")
+                g.add_edge(
+                    f"org-{client.id}",
+                    reg_node,
+                    "client",
+                    has_foreign_entity=bool(r.has_foreign_entity),
+                    foreign_countries=r.foreign_entity_countries or [],
+                )
 
     if reg_ids:
         lobbyist_rows = db.execute(
@@ -122,7 +140,15 @@ def get_organization_graph(
         ).all()
         for lobbyist, reg_id in lobbyist_rows:
             lob_node = f"lob-{lobbyist.id}"
-            if g.add_node(lob_node, lobbyist.name, "lobbyist"):
+            if g.add_node(
+                lob_node,
+                lobbyist.name,
+                "lobbyist",
+                has_covered_position=bool(lobbyist.has_covered_position),
+                covered_positions=lobbyist.covered_positions or [],
+                has_conviction=bool(lobbyist.has_conviction),
+                conviction_disclosure=lobbyist.conviction_disclosure,
+            ):
                 g.add_edge(f"reg-{reg_id}", lob_node, "represented_by")
 
     contrib_query = (
@@ -310,7 +336,14 @@ def get_issue_graph(
             org_ids.add(oid)
             org = db.get(Organization, oid)
             if org and g.add_node(f"org-{org.id}", org.name, "organization", subtype=org.type):
-                g.add_edge(f"org-{org.id}", issue_node_id, "lobbied_on", filing_year=r.filing_year)
+                g.add_edge(
+                    f"org-{org.id}",
+                    issue_node_id,
+                    "lobbied_on",
+                    filing_year=r.filing_year,
+                    has_foreign_entity=bool(r.has_foreign_entity),
+                    foreign_countries=r.foreign_entity_countries or [],
+                )
         for code in r.issue_codes or []:
             issue_codes.add(code)
 

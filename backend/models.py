@@ -2,12 +2,14 @@ import os
 
 from dotenv import load_dotenv
 from sqlalchemy import Boolean, Column, Date, ForeignKey, Integer, Numeric, Text, create_engine
-from sqlalchemy.dialects.postgresql import ARRAY, TSVECTOR
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://lobbying:lobbying@localhost:5432/lobbying")
+if DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -49,6 +51,10 @@ class Lobbyist(Base):
     name = Column(Text, nullable=False)
     name_normalized = Column(Text, nullable=False)
     lda_id = Column(Text, unique=True)
+    covered_positions = Column(ARRAY(Text))
+    has_covered_position = Column(Boolean, default=False)
+    conviction_disclosure = Column(Text)
+    has_conviction = Column(Boolean, default=False)
 
 
 class LobbyingRegistration(Base):
@@ -64,6 +70,9 @@ class LobbyingRegistration(Base):
     general_issue_codes = Column(ARRAY(Text))
     specific_issues = Column(Text)
     specific_issues_tsv = Column(TSVECTOR)
+    has_foreign_entity = Column(Boolean, default=False)
+    foreign_entity_names = Column(ARRAY(Text))
+    foreign_entity_countries = Column(ARRAY(Text))
 
 
 class LobbyingLobbyist(Base):
@@ -100,3 +109,16 @@ class Vote(Base):
     vote_date = Column(Date)
     congress = Column(Integer)
     issue_tags = Column(ARRAY(Text))
+
+
+class LobbyistContribution(Base):
+    __tablename__ = "lobbyist_contributions"
+    id = Column(Integer, primary_key=True)
+    filing_uuid = Column(Text, unique=True, nullable=False)
+    lobbyist_id = Column(Integer, ForeignKey("lobbyists.id"))
+    registrant_id = Column(Integer, ForeignKey("organizations.id"))
+    filing_year = Column(Integer)
+    filing_period = Column(Text)
+    contribution_items = Column(JSONB)
+    pacs = Column(ARRAY(Text))
+    dt_posted = Column(Date)

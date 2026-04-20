@@ -36,3 +36,18 @@ export async function fetchIssueGraph(q, filters = {}) {
   const { data } = await client.get('/graph/issue', { params: { q, ...filters } })
   return data
 }
+
+export async function fetchBetrayalIndex(params = {}) {
+  const { data } = await client.get('/analysis/betrayal-index', { params })
+  return data
+}
+
+export async function fetchRevolvingDoor(params = {}) {
+  const { data } = await client.get('/analysis/revolving-door', { params })
+  return data
+}
+
+export async function fetchForeignInfluence(params = {}) {
+  const { data } = await client.get('/analysis/foreign-influence', { params })
+  return data
+}

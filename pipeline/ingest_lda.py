@@ -1,68 +1,75 @@
 import argparse
+import asyncio
 import logging
 import os
 import time
-from datetime import datetime
+from typing import Any
 
-import requests
+import aiohttp
 from dotenv import load_dotenv
-from sqlalchemy.dialects.postgresql import insert
+from tqdm import tqdm
 
 from db import (
-    SessionLocal,
-    complete_ingestion_run,
-    fail_ingestion_run,
-    get_resume_page,
-    lobbying_lobbyists,
-    lobbying_registrations,
-    start_ingestion_run,
-    update_ingestion_run_progress,
-    upsert_lobbyist,
-    upsert_organization,
+    apply_enhancement_migrations,
+    connect_async,
+    drop_indexes_for_bulk_load,
+    normalize_name,
+    optimize_for_bulk_load,
+    rebuild_indexes,
 )
 
 load_dotenv()
 
-API_BASE = "https://lda.senate.gov/api/v1"
+API_BASE = "https://lda.gov/api/v1"
 API_KEY = os.getenv("LDA_API_KEY")
-RATE_LIMIT_SECONDS = 0.5
-SOURCE = "lda"
+# LDA docs allow 120 req/min with an API key.
+SEM = asyncio.Semaphore(10)
+FLUSH_SIZE = 500
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("pipeline_errors.log"),
-    ],
+    handlers=[logging.StreamHandler(), logging.FileHandler("pipeline_errors.log")],
 )
 
 
-def fetch_page(endpoint: str, params: dict, page: int):
-    url = f"{API_BASE}{endpoint}"
-    headers = {"Authorization": f"Token {API_KEY}"}
-    req_params = {**params, "page": page}
-    resp = requests.get(url, params=req_params, headers=headers, timeout=30)
-    time.sleep(RATE_LIMIT_SECONDS)
-    resp.raise_for_status()
-    payload = resp.json()
-    results = payload.get("results", []) if isinstance(payload, dict) else []
-    has_next = bool(payload.get("next")) if isinstance(payload, dict) else False
-    return results, has_next
+async def fetch_json(session: aiohttp.ClientSession, url: str, params: dict[str, Any] | None = None):
+    delay = 0.05
+    for attempt in range(3):
+        try:
+            async with SEM:
+                await asyncio.sleep(0.05)
+                async with session.get(url, params=params, timeout=60) as resp:
+                    if resp.status == 429:
+                        retry_after = int(resp.headers.get("Retry-After", 60))
+                        logging.warning("Rate limited. Waiting %ss", retry_after)
+                        await asyncio.sleep(retry_after)
+                        await asyncio.sleep(0.05)
+                        async with session.get(url, params=params, timeout=60) as retry_resp:
+                            if retry_resp.status >= 400:
+                                raise RuntimeError(f"HTTP {retry_resp.status}: {await retry_resp.text()}")
+                            return await retry_resp.json()
+                    if resp.status >= 400:
+                        raise RuntimeError(f"HTTP {resp.status}: {await resp.text()}")
+                    return await resp.json()
+        except Exception as exc:
+            if attempt == 2:
+                logging.exception("LDA request failed url=%s params=%s", url, params)
+                return None
+            await asyncio.sleep(delay)
+            delay *= 2
 
 
-def filing_period_to_year(period: str):
-    if not period:
+def filing_to_records(filing: dict[str, Any]):
+    filing_uuid = filing.get("filing_uuid")
+    if not filing_uuid:
         return None
-    for token in period.split("-"):
-        if token.isdigit() and len(token) == 4:
-            return int(token)
-    return None
 
-
-def extract_issue_fields(filing: dict):
-    issue_items = filing.get("lobbying_issues") or []
-    issue_codes = sorted({x.get("general_issue_code") for x in issue_items if x.get("general_issue_code")})
+    registrant = (filing.get("registrant") or {}).get("name")
+    client = (filing.get("client") or {}).get("name")
+    filing_year = filing.get("filing_year")
+    filing_period = filing.get("filing_period")
+    amount = filing.get("income") or filing.get("expenses") or filing.get("amount") or 0
 
     activities = filing.get("lobbying_activities") or []
     general_issue_codes = list({a.get("general_issue_code") for a in activities if a.get("general_issue_code")})
@@ -71,151 +78,263 @@ def extract_issue_fields(filing: dict):
         for a in activities
         if a.get("specific_issues")
     )
+    foreign_entities = filing.get("foreign_entities") or []
+    has_foreign_entity = len(foreign_entities) > 0
+    foreign_entity_names = [fe.get("name") for fe in foreign_entities if fe.get("name")]
+    foreign_entity_countries = list({fe.get("country") for fe in foreign_entities if fe.get("country")})
 
-    if not general_issue_codes:
-        general_issue_codes = issue_codes
-    if not specific_issues:
-        specific_issues = " | ".join([x.get("specific_issues") for x in issue_items if x.get("specific_issues")])
+    org_rows = []
+    if registrant:
+        org_rows.append((registrant, normalize_name(registrant), "registrant"))
+    if client:
+        org_rows.append((client, normalize_name(client), "client"))
 
-    return issue_codes, general_issue_codes, specific_issues
+    reg_row = (
+        filing_uuid,
+        registrant,
+        normalize_name(registrant) if registrant else None,
+        client,
+        normalize_name(client) if client else None,
+        filing_year,
+        filing_period,
+        amount,
+        general_issue_codes,
+        specific_issues,
+        has_foreign_entity,
+        foreign_entity_names,
+        foreign_entity_countries,
+    )
+
+    lobbyist_rows: dict[tuple[str | None, str], dict[str, Any]] = {}
+    link_rows = []
+
+    def upsert_lobbyist_row(raw: dict[str, Any], covered_positions: list[str] | None = None, conviction: str | None = None):
+        lobbyist_name = raw.get("lobbyist") or raw.get("name")
+        if isinstance(lobbyist_name, dict):
+            lobbyist_name = lobbyist_name.get("name")
+        if not lobbyist_name:
+            return
+
+        normalized_name = normalize_name(lobbyist_name)
+        lda_id = str(raw.get("id") or raw.get("lobbyist_id") or "") or None
+        key = (lda_id, normalized_name)
+        record = lobbyist_rows.get(
+            key,
+            {
+                "name": lobbyist_name,
+                "name_normalized": normalized_name,
+                "lda_id": lda_id,
+                "covered_positions": [],
+                "has_covered_position": False,
+                "conviction_disclosure": None,
+                "has_conviction": False,
+            },
+        )
+
+        if covered_positions:
+            deduped_positions = list(dict.fromkeys([*record["covered_positions"], *covered_positions]))
+            record["covered_positions"] = deduped_positions
+            record["has_covered_position"] = len(deduped_positions) > 0
+
+        if conviction:
+            record["conviction_disclosure"] = conviction
+            record["has_conviction"] = True
+
+        lobbyist_rows[key] = record
+        link_rows.append((filing_uuid, lda_id, normalized_name))
+
+    for l in filing.get("lobbyists", []) or []:
+        upsert_lobbyist_row(l)
+
+    for activity in activities:
+        for lob in activity.get("lobbyists") or []:
+            covered = lob.get("covered_positions") or []
+            covered_positions = [p.get("position_held") for p in covered if p.get("position_held")]
+            conviction = lob.get("lobbyist_conviction_disclosure")
+            upsert_lobbyist_row(lob, covered_positions=covered_positions, conviction=conviction)
+
+    lobbyist_row_values = [
+        (
+            row["name"],
+            row["name_normalized"],
+            row["lda_id"],
+            row["has_covered_position"],
+            row["covered_positions"] or [],
+            row["has_conviction"],
+            row["conviction_disclosure"],
+        )
+        for row in lobbyist_rows.values()
+    ]
+
+    return org_rows, reg_row, lobbyist_row_values, link_rows
 
 
-def ingest_filings(year_start: int, year_end: int, filing_period: str | None):
-    db = SessionLocal()
-    inserted = 0
-    params = {
-        "page_size": 50,
-        "filing_year__gte": year_start,
-        "filing_year__lte": year_end,
-    }
-    if filing_period:
-        params["filing_period"] = filing_period
-
-    run_id = None
-    page = 1
-
-    try:
-        page = get_resume_page(db, SOURCE)
-        run_id = start_ingestion_run(db, SOURCE, last_page=page - 1)
-        logging.info("LDA ingest run_id=%s resume_page=%s", run_id, page)
-
-        while True:
-            try:
-                filings, has_next = fetch_page("/filings/", params, page)
-            except Exception:
-                logging.exception("Failed fetching LDA page=%s", page)
-                raise
-
-            if not filings:
-                break
-
-            for filing in filings:
-                try:
-                    registrant_name = (filing.get("registrant") or {}).get("name")
-                    client_name = (filing.get("client") or {}).get("name")
-                    filing_uuid = filing.get("filing_uuid")
-                    amount = filing.get("income") or filing.get("expenses") or filing.get("amount")
-                    filing_year = filing.get("filing_year") or filing_period_to_year(filing.get("filing_period"))
-                    period = filing.get("filing_period")
-
-                    if not filing_uuid:
-                        logging.warning("Skipping filing with no UUID")
-                        continue
-
-                    registrant_id = upsert_organization(db, registrant_name, "registrant") if registrant_name else None
-                    client_id = upsert_organization(db, client_name, "client") if client_name else None
-                    issue_codes, general_issue_codes, specific_issues = extract_issue_fields(filing)
-
-                    reg_stmt = (
-                        insert(lobbying_registrations)
-                        .values(
-                            registrant_id=registrant_id,
-                            client_id=client_id,
-                            filing_uuid=filing_uuid,
-                            filing_year=filing_year,
-                            filing_period=period,
-                            amount=amount,
-                            issue_codes=issue_codes,
-                            general_issue_codes=general_issue_codes,
-                            specific_issues=specific_issues,
-                        )
-                        .on_conflict_do_update(
-                            index_elements=[lobbying_registrations.c.filing_uuid],
-                            set_={
-                                "amount": amount,
-                                "issue_codes": issue_codes,
-                                "general_issue_codes": general_issue_codes,
-                                "specific_issues": specific_issues,
-                            },
-                        )
-                        .returning(lobbying_registrations.c.id)
-                    )
-                    registration_id = db.execute(reg_stmt).scalar_one_or_none()
-                    if not registration_id:
-                        continue
-
-                    for lob in filing.get("lobbyists", []) or []:
-                        name = lob.get("lobbyist") or lob.get("name")
-                        if isinstance(name, dict):
-                            name = name.get("name")
-                        lobbyist_id = upsert_lobbyist(db, name=name, lda_id=lob.get("id") or lob.get("lobbyist_id"))
-                        if not lobbyist_id:
-                            continue
-                        link_stmt = (
-                            insert(lobbying_lobbyists)
-                            .values(registration_id=registration_id, lobbyist_id=lobbyist_id)
-                            .on_conflict_do_nothing()
-                        )
-                        db.execute(link_stmt)
-
-                    db.commit()
-                    inserted += 1
-                except Exception:
-                    db.rollback()
-                    logging.exception("Failed processing filing %s", filing.get("filing_uuid"))
-
-            update_ingestion_run_progress(
-                db,
-                run_id=run_id,
-                last_page=page,
-                records_processed=inserted,
-                last_filing_uuid=filings[-1].get("filing_uuid"),
+async def flush_buffers(conn, org_buf, reg_buf, lobbyist_buf, link_buf):
+    if org_buf:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO organizations (name, name_normalized, type)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (name_normalized) DO NOTHING
+                """,
+                list({row for row in org_buf}),
             )
-            logging.info("Processed page=%s total_filings=%s", page, inserted)
+        org_buf.clear()
 
-            if not has_next:
-                break
-            page += 1
+    if lobbyist_buf:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO lobbyists (
+                    name,
+                    name_normalized,
+                    lda_id,
+                    has_covered_position,
+                    covered_positions,
+                    has_conviction,
+                    conviction_disclosure
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (lda_id) DO UPDATE SET
+                    has_covered_position = EXCLUDED.has_covered_position,
+                    covered_positions = EXCLUDED.covered_positions,
+                    has_conviction = EXCLUDED.has_conviction,
+                    conviction_disclosure = EXCLUDED.conviction_disclosure
+                """,
+                list({row for row in lobbyist_buf if row[2]}),
+            )
+        lobbyist_buf.clear()
 
-        complete_ingestion_run(db, run_id)
-    except Exception:
-        if run_id is not None:
-            fail_ingestion_run(db, run_id)
-        raise
-    finally:
-        db.close()
+    if reg_buf:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO lobbying_registrations (
+                    filing_uuid,
+                    registrant_id,
+                    client_id,
+                    filing_year,
+                    filing_period,
+                    amount,
+                    general_issue_codes,
+                    specific_issues,
+                    has_foreign_entity,
+                    foreign_entity_names,
+                    foreign_entity_countries
+                )
+                VALUES (
+                    %s,
+                    (SELECT id FROM organizations WHERE name_normalized = %s LIMIT 1),
+                    (SELECT id FROM organizations WHERE name_normalized = %s LIMIT 1),
+                    %s,%s,%s,%s,%s,%s,%s,%s
+                )
+                ON CONFLICT (filing_uuid) DO UPDATE SET
+                    has_foreign_entity = EXCLUDED.has_foreign_entity,
+                    foreign_entity_names = EXCLUDED.foreign_entity_names,
+                    foreign_entity_countries = EXCLUDED.foreign_entity_countries
+                """,
+                [(r[0], r[2], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12]) for r in reg_buf],
+            )
+        reg_buf.clear()
 
-    logging.info("Done. Processed filings: %s", inserted)
+    if link_buf:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                """
+                INSERT INTO lobbying_lobbyists (registration_id, lobbyist_id)
+                SELECT
+                    (SELECT id FROM lobbying_registrations WHERE filing_uuid = %s LIMIT 1),
+                    COALESCE(
+                        (SELECT id FROM lobbyists WHERE lda_id = %s LIMIT 1),
+                        (SELECT id FROM lobbyists WHERE name_normalized = %s LIMIT 1)
+                    )
+                ON CONFLICT DO NOTHING
+                """,
+                link_buf,
+            )
+        link_buf.clear()
+
+    await conn.commit()
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Ingest LDA filings")
-    parser.add_argument("--year-start", type=int, default=2023)
-    parser.add_argument("--year-end", type=int, default=2025)
-    parser.add_argument("--period", type=str, default=None, help="e.g. first_quarter")
-    args = parser.parse_args()
+async def ingest_year(session: aiohttp.ClientSession, conn, year: int, start_page: int = 1):
+    page = max(1, start_page)
+    processed = 0
+    org_buf = []
+    reg_buf = []
+    lobbyist_buf = []
+    link_buf = []
 
+    pbar = tqdm(desc=f"LDA {year}", unit="filings")
+    start = time.time()
+
+    while True:
+        url = f"{API_BASE}/filings/"
+        payload = await fetch_json(
+            session,
+            url,
+            params={"filing_year": year, "page_size": 200, "page": page},
+        )
+        if not payload:
+            break
+        results = payload.get("results", [])
+        if not results:
+            break
+
+        for filing in results:
+            try:
+                rec = filing_to_records(filing)
+                if not rec:
+                    continue
+                org_rows, reg_row, lobbyist_rows, link_rows = rec
+                org_buf.extend(org_rows)
+                reg_buf.append(reg_row)
+                lobbyist_buf.extend(lobbyist_rows)
+                link_buf.extend(link_rows)
+                processed += 1
+                pbar.update(1)
+            except Exception:
+                logging.exception("Failed processing LDA filing_uuid=%s", filing.get("filing_uuid"))
+
+            if processed % FLUSH_SIZE == 0:
+                await flush_buffers(conn, org_buf, reg_buf, lobbyist_buf, link_buf)
+
+        pbar.set_postfix(page=page, elapsed=f"{int(time.time() - start)}s")
+        if not payload.get("next"):
+            break
+        page += 1
+
+    await flush_buffers(conn, org_buf, reg_buf, lobbyist_buf, link_buf)
+    pbar.close()
+
+
+async def main_async(years: list[int], start_page: int):
     if not API_KEY:
         raise RuntimeError("LDA_API_KEY is required")
 
-    logging.info(
-        "Starting LDA ingest for years %s-%s period=%s at %s",
-        args.year_start,
-        args.year_end,
-        args.period,
-        datetime.utcnow().isoformat(),
-    )
-    ingest_filings(args.year_start, args.year_end, args.period)
+    headers = {"Authorization": f"Token {API_KEY}"}
+    conn = await connect_async()
+    await apply_enhancement_migrations(conn)
+    await optimize_for_bulk_load(conn)
+    await drop_indexes_for_bulk_load(conn)
+
+    async with aiohttp.ClientSession(headers=headers) as session:
+        for idx, year in enumerate(years):
+            year_start_page = start_page if idx == 0 else 1
+            await ingest_year(session, conn, year, start_page=year_start_page)
+
+    await rebuild_indexes(conn)
+    await conn.commit()
+    await conn.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Async ingest LDA filings")
+    parser.add_argument("--years", nargs="+", type=int, default=[2023, 2024])
+    parser.add_argument("--start-page", type=int, default=1)
+    args = parser.parse_args()
+    asyncio.run(main_async(args.years, args.start_page))
 
 
 if __name__ == "__main__":
