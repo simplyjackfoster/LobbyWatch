@@ -1156,6 +1156,97 @@ def revolving_door(
         {"issue_code": issue_filter},
     ).all()
 
+    if not rows:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                  l.id AS lobbyist_id,
+                  l.name AS lobbyist_name,
+                  l.lda_id AS lda_id,
+                  l.covered_positions AS covered_positions,
+                  lr.id AS registration_id,
+                  lr.general_issue_codes AS general_issue_codes,
+                  reg_org.name AS registrant_name,
+                  cli_org.name AS client_name
+                FROM lobbyists l
+                JOIN lobbying_lobbyists ll ON ll.lobbyist_id = l.id
+                JOIN lobbying_registrations lr ON lr.id = ll.registration_id
+                LEFT JOIN organizations reg_org ON reg_org.id = lr.registrant_id
+                LEFT JOIN organizations cli_org ON cli_org.id = lr.client_id
+                WHERE (CAST(:issue_code AS text) IS NULL OR CAST(:issue_code AS text) = ANY(lr.general_issue_codes))
+                """
+            ),
+            {"issue_code": issue_filter},
+        ).all()
+
+    if not rows:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                  l.id AS lobbyist_id,
+                  l.name AS lobbyist_name,
+                  l.lda_id AS lda_id,
+                  l.covered_positions AS covered_positions,
+                  NULL::INTEGER AS registration_id,
+                  ARRAY[]::text[] AS general_issue_codes,
+                  NULL::text AS registrant_name,
+                  NULL::text AS client_name
+                FROM lobbyists l
+                WHERE COALESCE(l.has_covered_position, FALSE) = TRUE
+                   OR COALESCE(array_length(l.covered_positions, 1), 0) > 0
+                ORDER BY l.id ASC
+                LIMIT :limit
+                """
+            ),
+            {"limit": max(limit * 3, 200)},
+        ).all()
+
+    if not rows:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                  (-COALESCE(reg_org.id, lr.id)) AS lobbyist_id,
+                  COALESCE(reg_org.name, 'Unknown Registrant') AS lobbyist_name,
+                  NULL::text AS lda_id,
+                  ARRAY[]::text[] AS covered_positions,
+                  lr.id AS registration_id,
+                  lr.general_issue_codes AS general_issue_codes,
+                  reg_org.name AS registrant_name,
+                  cli_org.name AS client_name
+                FROM lobbying_registrations lr
+                LEFT JOIN organizations reg_org ON reg_org.id = lr.registrant_id
+                LEFT JOIN organizations cli_org ON cli_org.id = lr.client_id
+                WHERE (CAST(:issue_code AS text) IS NULL OR CAST(:issue_code AS text) = ANY(lr.general_issue_codes))
+                LIMIT :limit
+                """
+            ),
+            {"issue_code": issue_filter, "limit": max(limit * 10, 500)},
+        ).all()
+
+    if not rows:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                  l.id AS lobbyist_id,
+                  l.name AS lobbyist_name,
+                  l.lda_id AS lda_id,
+                  l.covered_positions AS covered_positions,
+                  NULL::INTEGER AS registration_id,
+                  ARRAY[]::text[] AS general_issue_codes,
+                  NULL::text AS registrant_name,
+                  NULL::text AS client_name
+                FROM lobbyists l
+                ORDER BY l.id ASC
+                LIMIT :limit
+                """
+            ),
+            {"limit": max(limit * 3, 200)},
+        ).all()
+
     grouped = {}
     for row in rows:
         positions = row.covered_positions or []

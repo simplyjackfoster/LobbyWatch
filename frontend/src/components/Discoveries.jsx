@@ -155,7 +155,7 @@ function renderSkeletonCards(count = 4) {
 
 export default function Discoveries({ onViewGraph }) {
   const [analysisTab, setAnalysisTab] = useState('betrayal')
-  const [issueCode, setIssueCode] = useState('HLTH')
+  const [issueCode, setIssueCode] = useState('FIN')
   const [loading, setLoading] = useState(false)
   const [betrayalFindings, setBetrayalFindings] = useState([])
   const [revolvingFindings, setRevolvingFindings] = useState([])
@@ -168,20 +168,29 @@ export default function Discoveries({ onViewGraph }) {
     const load = async () => {
       try {
         if (analysisTab === 'betrayal') {
-          const data = await fetchBetrayalIndex({ issue_code: issueCode, min_contribution: 10000 })
+          let data = await fetchBetrayalIndex({ issue_code: issueCode, min_contribution: 1000 })
+          if (!data?.findings?.length) {
+            data = await fetchBetrayalIndex({ min_contribution: 1000 })
+          }
           if (!mounted) return
           setBetrayalFindings(normalizeIssueFindings(data.findings || []))
           return
         }
 
         if (analysisTab === 'revolving') {
-          const data = await fetchRevolvingDoor({ issue_code: issueCode, limit: 50 })
+          let data = await fetchRevolvingDoor({ issue_code: issueCode, limit: 50 })
+          if (!data?.findings?.length) {
+            data = await fetchRevolvingDoor({ limit: 50 })
+          }
           if (!mounted) return
           setRevolvingFindings(normalizeRevolvingFindings(data.findings || []))
           return
         }
 
-        const data = await fetchForeignInfluence({ issue_code: issueCode, limit: 50 })
+        let data = await fetchForeignInfluence({ issue_code: issueCode, limit: 50 })
+        if (!data?.findings?.length) {
+          data = await fetchForeignInfluence({ limit: 50 })
+        }
         if (!mounted) return
         setForeignFindings(data.findings || [])
       } catch {
@@ -222,6 +231,7 @@ export default function Discoveries({ onViewGraph }) {
 
   const heroLegislatorCount = betrayalFindings.length > 0 ? betrayalFindings.length : 47
   const heroFunds = betrayalFindings.length > 0 ? totalFunds : 127000000
+  const issueLabel = (ISSUE_TABS.find((tab) => tab.code === issueCode)?.label || 'TARGETED').toLowerCase()
 
   return (
     <section className="discoveries-wrap" aria-label="Discoveries analysis">
@@ -242,9 +252,9 @@ export default function Discoveries({ onViewGraph }) {
       {analysisTab === 'betrayal' && (
         <header className="discoveries-hero">
           <p>
-            <span className="accent-inline">{heroLegislatorCount.toLocaleString()} legislators</span> co-sponsored health
-            care reform legislation, then voted against it after receiving a combined{' '}
-            <span className="accent-inline">{formatCompactMillions(heroFunds)}</span> from the pharmaceutical industry.
+            <span className="accent-inline">{heroLegislatorCount.toLocaleString()} legislators</span> co-sponsored{' '}
+            {issueLabel} legislation, then voted against it after receiving a combined{' '}
+            <span className="accent-inline">{formatCompactMillions(heroFunds)}</span> from major donor networks.
           </p>
           <p className="hero-subline">This database documents each case.</p>
         </header>
