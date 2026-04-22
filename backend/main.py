@@ -8,13 +8,17 @@ from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 import yaml
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from aws_env import bootstrap_ssm_env
+
+bootstrap_ssm_env()
 
 from graph import get_entity_summary, get_issue_graph, get_legislator_graph, get_organization_graph
 from models import SessionLocal
@@ -87,6 +91,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_ORIGIN_VERIFY_SECRET = os.getenv("CF_API_SHARED_SECRET", "").strip()
+
+
+@app.middleware("http")
+async def restrict_direct_origin(request: Request, call_next):
+    if _ORIGIN_VERIFY_SECRET and request.method.upper() != "OPTIONS":
+        header_value = (request.headers.get("x-origin-verify") or "").strip()
+        if header_value != _ORIGIN_VERIFY_SECRET:
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"detail": "forbidden"},
+            )
+    return await call_next(request)
 
 
 def get_db():
@@ -1301,20 +1319,21 @@ def foreign_influence(
     return {"findings": findings[:limit]}
 
 
-# Serve React frontend — must come after all API routes
-_FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
-_FRONTEND_ASSETS = os.path.join(_FRONTEND_DIST, "assets")
+if os.getenv("SERVE_FRONTEND", "1") == "1":
+    # Serve React frontend — must come after all API routes
+    _FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "dist"))
+    _FRONTEND_ASSETS = os.path.join(_FRONTEND_DIST, "assets")
 
-if os.path.isdir(_FRONTEND_ASSETS):
-    app.mount("/assets", StaticFiles(directory=_FRONTEND_ASSETS), name="assets")
+    if os.path.isdir(_FRONTEND_ASSETS):
+        app.mount("/assets", StaticFiles(directory=_FRONTEND_ASSETS), name="assets")
 
-@app.get("/")
-def serve_root():
-    return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
+    @app.get("/")
+    def serve_root():
+        return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
 
-@app.get("/{full_path:path}")
-def serve_frontend(full_path: str):
-    file_path = os.path.join(_FRONTEND_DIST, full_path)
-    if os.path.isfile(file_path):
-        return FileResponse(file_path)
-    return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))
+    @app.get("/{full_path:path}")
+    def serve_frontend(full_path: str):
+        file_path = os.path.join(_FRONTEND_DIST, full_path)
+        if os.path.isfile(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(_FRONTEND_DIST, "index.html"))

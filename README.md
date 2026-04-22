@@ -22,6 +22,8 @@ It combines:
 - `pipeline/`: DB migrations and ingestion scripts
 - `backend/`: FastAPI API server
 - `frontend/`: React + Vite client
+- `infra/terraform/`: AWS infrastructure (CloudFront + S3 + Lambda + RDS + SQS/EventBridge)
+- `scripts/`: packaging/deploy/migration scripts for AWS rollout
 - `docker-compose.yml`: local multi-service orchestration
 
 ## Setup (Exact Order)
@@ -79,6 +81,85 @@ docker compose up --build
 9. Open the app:
 - Frontend: `http://localhost:5173`
 - Backend API: `http://localhost:8000`
+
+## AWS-First Deployment (Terraform + RDS)
+
+This repo supports an AWS production topology:
+
+- CloudFront
+  - `/*` -> S3 static frontend
+  - `/api/*` -> API Gateway HTTP API -> Lambda (FastAPI via Mangum)
+- RDS PostgreSQL
+- SQS + EventBridge + worker Lambda
+- SSM Parameter Store (`SecureString`) for runtime config
+- Porkbun DNS (external) for domain records
+
+### 1. Build Lambda Artifacts
+
+```bash
+./scripts/build_lambda_packages.sh
+```
+
+Outputs:
+- `dist/lambda_api.zip`
+- `dist/lambda_worker.zip`
+
+### 2. Provision AWS Infrastructure
+
+```bash
+cd infra/terraform
+terraform init
+terraform workspace select prod || terraform workspace new prod
+terraform apply \
+  -var="environment=prod" \
+  -var="rds_password=CHANGE_ME" \
+  -var="domain_name=lobby.watch" \
+  -var="acm_certificate_arn=arn:aws:acm:us-east-1:...:certificate/..." \
+  -var="lambda_api_package=../../dist/lambda_api.zip" \
+  -var="lambda_worker_package=../../dist/lambda_worker.zip"
+```
+
+Use `terraform output` to retrieve:
+- `site_bucket_name`
+- `cloudfront_domain_name`
+- `rds_endpoint`
+
+### 3. Migrate Data to Hosted RDS (Current + Previous Year)
+
+```bash
+./scripts/migrate_filtered_to_rds.sh \
+  "$LOCAL_DATABASE_URL" \
+  "$RDS_DATABASE_URL" \
+  2025 \
+  118
+```
+
+This loads all small/dimension tables and filtered fact tables only.
+Full historical data remains local.
+
+### 4. Deploy Frontend to S3 + Invalidate CloudFront
+
+```bash
+./scripts/deploy_frontend_s3.sh <site_bucket_name> <cloudfront_distribution_id>
+```
+
+### 5. Point Porkbun DNS to CloudFront
+
+Set `lobby.watch` ALIAS/ANAME to the `cloudfront_domain_name` output.
+Route 53 is intentionally not required.
+
+## CI/CD
+
+GitHub Actions workflows:
+- `.github/workflows/aws-terraform-plan.yml`: Terraform validate/plan
+- `.github/workflows/aws-deploy.yml`: package lambdas -> apply infra -> deploy frontend
+
+Required repository secrets/vars include:
+- `AWS_ROLE_TO_ASSUME`
+- `RDS_PASSWORD`
+- `ACM_CERTIFICATE_ARN` (if using custom domain)
+- `SSM_SECURE_PARAMS_JSON` (optional JSON map for SecureString params)
+- `DOMAIN_NAME`, `AWS_REGION` (vars)
 
 The LDA API migrated from `lda.senate.gov` to `lda.gov` in 2026.  
 All pipeline code uses `lda.gov/api/v1/` as of this version.

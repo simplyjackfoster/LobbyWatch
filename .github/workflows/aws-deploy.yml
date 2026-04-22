@@ -1,0 +1,131 @@
+name: aws-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment/workspace (dev or prod)'
+        required: true
+        default: 'prod'
+      apply_infra:
+        description: 'Apply Terraform changes'
+        required: true
+        default: true
+        type: boolean
+      deploy_frontend:
+        description: 'Build and deploy frontend to S3/CloudFront'
+        required: true
+        default: true
+        type: boolean
+
+env:
+  TF_IN_AUTOMATION: true
+
+jobs:
+  package_backend:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build Lambda zip packages
+        run: ./scripts/build_lambda_packages.sh
+      - name: Upload lambda artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-zips
+          path: |
+            dist/lambda_api.zip
+            dist/lambda_worker.zip
+
+  infra_apply:
+    if: ${{ inputs.apply_infra }}
+    runs-on: ubuntu-latest
+    needs: package_backend
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      site_bucket: ${{ steps.tfout.outputs.site_bucket_name }}
+      distribution_id: ${{ steps.cf.outputs.distribution_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: lambda-zips
+          path: dist
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform init
+        working-directory: infra/terraform
+        run: terraform init
+
+      - name: Terraform workspace
+        working-directory: infra/terraform
+        run: |
+          terraform workspace select "${{ inputs.environment }}" || terraform workspace new "${{ inputs.environment }}"
+
+      - name: Terraform apply
+        working-directory: infra/terraform
+        env:
+          TF_VAR_environment: ${{ inputs.environment }}
+          TF_VAR_rds_password: ${{ secrets.RDS_PASSWORD }}
+          TF_VAR_domain_name: ${{ vars.DOMAIN_NAME }}
+          TF_VAR_acm_certificate_arn: ${{ secrets.ACM_CERTIFICATE_ARN }}
+          TF_VAR_lambda_api_package: ../../dist/lambda_api.zip
+          TF_VAR_lambda_worker_package: ../../dist/lambda_worker.zip
+          TF_VAR_enable_nat_gateway: ${{ vars.ENABLE_NAT_GATEWAY || 'false' }}
+          TF_VAR_budget_alert_emails: ${{ vars.BUDGET_ALERT_EMAILS_JSON || '[]' }}
+          TF_VAR_monthly_budget_limit_usd: ${{ vars.MONTHLY_BUDGET_LIMIT_USD || '20' }}
+          TF_VAR_ssm_secure_params: ${{ secrets.SSM_SECURE_PARAMS_JSON || '{}' }}
+        run: terraform apply -auto-approve -input=false
+
+      - id: tfout
+        name: Capture Terraform outputs
+        working-directory: infra/terraform
+        run: |
+          echo "site_bucket_name=$(terraform output -raw site_bucket_name)" >> "$GITHUB_OUTPUT"
+          echo "cloudfront_domain_name=$(terraform output -raw cloudfront_domain_name)" >> "$GITHUB_OUTPUT"
+
+      - id: cf
+        name: Resolve CloudFront distribution id
+        run: |
+          DIST_ID=$(aws cloudfront list-distributions --query "DistributionList.Items[?DomainName=='${{ steps.tfout.outputs.cloudfront_domain_name }}'].Id | [0]" --output text)
+          if [ -z "$DIST_ID" ] || [ "$DIST_ID" = "None" ]; then
+            echo "Failed to resolve CloudFront distribution id" >&2
+            exit 1
+          fi
+          echo "distribution_id=$DIST_ID" >> "$GITHUB_OUTPUT"
+
+  deploy_frontend:
+    if: ${{ inputs.deploy_frontend && inputs.apply_infra }}
+    runs-on: ubuntu-latest
+    needs: [infra_apply]
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      - name: Build and deploy frontend
+        env:
+          VITE_API_BASE_URL: /api
+        run: ./scripts/deploy_frontend_s3.sh "${{ needs.infra_apply.outputs.site_bucket }}" "${{ needs.infra_apply.outputs.distribution_id }}"

@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from sqlalchemy import Boolean, Column, Date, ForeignKey, Integer, Numeric, Text, create_engine
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import NullPool
 
 load_dotenv()
 
@@ -11,7 +12,22 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg://lobbying:lobbying
 if DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+psycopg://", 1)
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+_pool_size = int(os.getenv("SQLALCHEMY_POOL_SIZE", "5"))
+_max_overflow = int(os.getenv("SQLALCHEMY_MAX_OVERFLOW", "10"))
+_pool_timeout = int(os.getenv("SQLALCHEMY_POOL_TIMEOUT_SECONDS", "30"))
+_pool_recycle = int(os.getenv("SQLALCHEMY_POOL_RECYCLE_SECONDS", "1800"))
+_disable_pooling = os.getenv("SQLALCHEMY_DISABLE_POOLING", "0") == "1"
+
+engine_kwargs = {"pool_pre_ping": True}
+if _disable_pooling:
+    engine_kwargs["poolclass"] = NullPool
+else:
+    engine_kwargs["pool_size"] = _pool_size
+    engine_kwargs["max_overflow"] = _max_overflow
+    engine_kwargs["pool_timeout"] = _pool_timeout
+    engine_kwargs["pool_recycle"] = _pool_recycle
+
+engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 

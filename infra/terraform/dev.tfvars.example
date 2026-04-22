@@ -1,0 +1,25 @@
+environment = "dev"
+
+# Supply in CI or terraform.tfvars (never commit real secrets)
+rds_password = "CHANGE_ME"
+lambda_api_package    = "../../dist/lambda_api.zip"
+lambda_worker_package = "../../dist/lambda_worker.zip"
+
+# Optional custom domain + cert
+domain_name         = "lobby.watch"
+domain_aliases      = ["www.lobby.watch"]
+acm_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/xxxx"
+
+# Keep disabled for lower cost; enable if API needs outbound internet from VPC Lambdas.
+enable_nat_gateway = false
+api_throttle_rate_limit  = 10
+api_throttle_burst_limit = 20
+
+budget_alert_emails = ["you@example.com"]
+monthly_budget_limit_usd = "20"
+
+ssm_secure_params = {
+  congress_api_key = ""
+  fec_api_key      = ""
+  lda_api_key      = ""
+}

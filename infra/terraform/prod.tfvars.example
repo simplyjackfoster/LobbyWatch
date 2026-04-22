@@ -1,0 +1,22 @@
+environment = "prod"
+
+rds_password = "CHANGE_ME"
+lambda_api_package    = "../../dist/lambda_api.zip"
+lambda_worker_package = "../../dist/lambda_worker.zip"
+
+domain_name         = "lobby.watch"
+domain_aliases      = ["www.lobby.watch"]
+acm_certificate_arn = "arn:aws:acm:us-east-1:123456789012:certificate/xxxx"
+
+enable_nat_gateway = true
+api_throttle_rate_limit  = 25
+api_throttle_burst_limit = 50
+
+budget_alert_emails = ["you@example.com"]
+monthly_budget_limit_usd = "20"
+
+ssm_secure_params = {
+  congress_api_key = ""
+  fec_api_key      = ""
+  lda_api_key      = ""
+}
