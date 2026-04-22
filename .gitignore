@@ -28,3 +28,4 @@ crash.log
 
 # macOS
 .DS_Store
+*.tfvars

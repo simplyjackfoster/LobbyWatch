@@ -26,37 +26,101 @@ psql "${TARGET_URL}" -v ON_ERROR_STOP=1 -f "${ROOT_DIR}/pipeline/002_fts_and_iss
 
 echo "==> Truncating target tables"
 psql "${TARGET_URL}" -v ON_ERROR_STOP=1 <<SQL
-TRUNCATE TABLE
-  lobbying_lobbyists,
-  committee_memberships,
-  lobbyist_contributions,
-  co_sponsorships,
-  votes,
-  contributions,
-  lobbying_registrations,
-  lobbyists,
-  committees,
-  legislators,
-  organizations,
-  ingestion_runs
-RESTART IDENTITY CASCADE;
+DO \$\$
+DECLARE
+  tbl text;
+BEGIN
+  FOREACH tbl IN ARRAY ARRAY[
+    'lobbying_lobbyists',
+    'committee_memberships',
+    'co_sponsorships',
+    'votes',
+    'contributions',
+    'lobbying_registrations',
+    'lobbyists',
+    'committees',
+    'legislators',
+    'organizations',
+    'ingestion_runs'
+  ]
+  LOOP
+    IF to_regclass('public.' || tbl) IS NOT NULL THEN
+      EXECUTE format('TRUNCATE TABLE %I RESTART IDENTITY CASCADE', tbl);
+    END IF;
+  END LOOP;
+END
+\$\$;
 SQL
+
+table_exists() {
+  local db_url="$1"
+  local table="$2"
+  local exists
+  exists=$(psql "${db_url}" -tA -v ON_ERROR_STOP=1 -c "SELECT to_regclass('public.${table}') IS NOT NULL;")
+  [[ "${exists}" == "t" ]]
+}
+
+common_columns_csv() {
+  local table="$1"
+  local src_cols tgt_cols col csv
+  src_cols=$(psql "${SOURCE_URL}" -tA -v ON_ERROR_STOP=1 -c "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='${table}' ORDER BY ordinal_position;")
+  tgt_cols=$(psql "${TARGET_URL}" -tA -v ON_ERROR_STOP=1 -c "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='${table}' AND is_generated = 'NEVER' ORDER BY ordinal_position;")
+  csv=""
+  while IFS= read -r col; do
+    [[ -z "${col}" ]] && continue
+    if grep -qx "${col}" <<< "${src_cols}"; then
+      if [[ -n "${csv}" ]]; then
+        csv="${csv}, "
+      fi
+      csv="${csv}\"${col}\""
+    fi
+  done <<< "${tgt_cols}"
+  echo "${csv}"
+}
 
 copy_all() {
   local table="$1"
   local file="${TMP_DIR}/${table}.csv"
+  if ! table_exists "${SOURCE_URL}" "${table}"; then
+    echo "  - ${table} (skip: missing in source)"
+    return
+  fi
+  if ! table_exists "${TARGET_URL}" "${table}"; then
+    echo "  - ${table} (skip: missing in target)"
+    return
+  fi
+  local cols
+  cols=$(common_columns_csv "${table}")
+  if [[ -z "${cols}" ]]; then
+    echo "  - ${table} (skip: no common columns)"
+    return
+  fi
   echo "  - ${table}"
-  psql "${SOURCE_URL}" -v ON_ERROR_STOP=1 -c "\\copy ${table} TO '${file}' CSV"
-  psql "${TARGET_URL}" -v ON_ERROR_STOP=1 -c "\\copy ${table} FROM '${file}' CSV"
+  psql "${SOURCE_URL}" -v ON_ERROR_STOP=1 -c "\\copy (SELECT ${cols} FROM ${table}) TO '${file}' CSV"
+  psql "${TARGET_URL}" -v ON_ERROR_STOP=1 -c "\\copy ${table} (${cols}) FROM '${file}' CSV"
 }
 
 copy_filtered() {
   local table="$1"
   local where_clause="$2"
   local file="${TMP_DIR}/${table}.csv"
+  if ! table_exists "${SOURCE_URL}" "${table}"; then
+    echo "  - ${table} (skip: missing in source)"
+    return
+  fi
+  if ! table_exists "${TARGET_URL}" "${table}"; then
+    echo "  - ${table} (skip: missing in target)"
+    return
+  fi
+  local cols
+  cols=$(common_columns_csv "${table}")
+  if [[ -z "${cols}" ]]; then
+    echo "  - ${table} (skip: no common columns)"
+    return
+  fi
   echo "  - ${table} (filtered)"
-  psql "${SOURCE_URL}" -v ON_ERROR_STOP=1 -c "\\copy (SELECT * FROM ${table} WHERE ${where_clause}) TO '${file}' CSV"
-  psql "${TARGET_URL}" -v ON_ERROR_STOP=1 -c "\\copy ${table} FROM '${file}' CSV"
+  psql "${SOURCE_URL}" -v ON_ERROR_STOP=1 -c "\\copy (SELECT ${cols} FROM ${table} WHERE ${where_clause}) TO '${file}' CSV"
+  psql "${TARGET_URL}" -v ON_ERROR_STOP=1 -c "\\copy ${table} (${cols}) FROM '${file}' CSV"
 }
 
 echo "==> Copying dimension/small tables"
@@ -73,8 +137,6 @@ copy_filtered lobbying_registrations "filing_year >= ${YEAR_MIN}"
 copy_filtered contributions "contribution_date IS NULL OR EXTRACT(YEAR FROM contribution_date) >= ${YEAR_MIN}"
 copy_filtered votes "congress >= ${CONGRESS_MIN}"
 copy_filtered co_sponsorships "congress >= ${CONGRESS_MIN}"
-copy_filtered lobbyist_contributions "filing_year >= ${YEAR_MIN}"
-
 echo "==> Rebuilding indexes/stats"
 psql "${TARGET_URL}" -v ON_ERROR_STOP=1 -c "ANALYZE"
 
@@ -86,9 +148,7 @@ UNION ALL SELECT 'committees', COUNT(*) FROM committees
 UNION ALL SELECT 'committee_memberships', COUNT(*) FROM committee_memberships
 UNION ALL SELECT 'lobbying_registrations', COUNT(*) FROM lobbying_registrations
 UNION ALL SELECT 'contributions', COUNT(*) FROM contributions
-UNION ALL SELECT 'votes', COUNT(*) FROM votes
-UNION ALL SELECT 'co_sponsorships', COUNT(*) FROM co_sponsorships
-UNION ALL SELECT 'lobbyist_contributions', COUNT(*) FROM lobbyist_contributions;
+UNION ALL SELECT 'votes', COUNT(*) FROM votes;
 "
 
 echo "Migration completed."

@@ -492,7 +492,11 @@ def fetch_legislators_by_bioguide_ids(db: Session, bioguide_ids: list[str]) -> l
 
 
 def build_betrayal_map(db: Session) -> dict[str, dict]:
-    payload = betrayal_index(issue_code="HLTH", min_contribution=10000, contribution_window_days=365, db=db)
+    try:
+        payload = betrayal_index(issue_code="HLTH", min_contribution=10000, contribution_window_days=365, db=db)
+    except Exception:
+        db.rollback()
+        return {}
     return {
         normalize_person_name(row["legislator"]["name"]): {
             "betrayal_score": row.get("betrayal_score"),

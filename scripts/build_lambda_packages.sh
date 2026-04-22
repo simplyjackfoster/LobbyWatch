@@ -10,8 +10,20 @@ rm -rf "${BUILD_DIR}"
 mkdir -p "${API_DIR}" "${WORKER_DIR}" "${ROOT_DIR}/dist"
 
 python3 -m pip install --upgrade pip >/dev/null
-python3 -m pip install -r "${ROOT_DIR}/backend/requirements.txt" -t "${API_DIR}" >/dev/null
-python3 -m pip install -r "${ROOT_DIR}/backend/requirements.txt" -t "${WORKER_DIR}" >/dev/null
+python3 -m pip install \
+  --platform manylinux2014_x86_64 \
+  --implementation cp \
+  --python-version 3.12 \
+  --only-binary=:all: \
+  -r "${ROOT_DIR}/backend/requirements.txt" \
+  -t "${API_DIR}" >/dev/null
+python3 -m pip install \
+  --platform manylinux2014_x86_64 \
+  --implementation cp \
+  --python-version 3.12 \
+  --only-binary=:all: \
+  -r "${ROOT_DIR}/backend/requirements.txt" \
+  -t "${WORKER_DIR}" >/dev/null
 
 cp "${ROOT_DIR}/backend"/*.py "${API_DIR}/"
 cp "${ROOT_DIR}/backend"/*.py "${WORKER_DIR}/"

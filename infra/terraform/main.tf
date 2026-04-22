@@ -181,7 +181,7 @@ resource "aws_db_instance" "main" {
 }
 
 resource "aws_ssm_parameter" "managed" {
-  for_each = var.ssm_secure_params
+  for_each = nonsensitive(var.ssm_secure_params)
 
   name      = "${local.secure_param_prefix}/${each.key}"
   type      = "SecureString"
@@ -320,11 +320,10 @@ resource "aws_lambda_function" "api" {
   environment {
     variables = {
       LOBBYWATCH_ENV                  = var.environment
-      DATABASE_URL_PARAM              = aws_ssm_parameter.database_url.name
-      SSM_PARAM_PREFIX                = local.secure_param_prefix
-      ENABLE_SSM_CONFIG               = "1"
+      ENABLE_SSM_CONFIG               = "0"
+      DATABASE_URL                    = "postgresql://${var.rds_username}:${var.rds_password}@${aws_db_instance.main.address}:5432/${var.rds_db_name}"
+      CF_API_SHARED_SECRET            = random_password.origin_verify.result
       SERVE_FRONTEND                  = "0"
-      CF_API_SHARED_SECRET_PARAM      = aws_ssm_parameter.origin_verify.name
       SQLALCHEMY_POOL_SIZE            = "1"
       SQLALCHEMY_MAX_OVERFLOW         = "0"
       SQLALCHEMY_POOL_TIMEOUT_SECONDS = "5"
@@ -541,7 +540,7 @@ resource "aws_cloudfront_distribution" "main" {
     compress               = true
 
     cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
-    origin_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3"
+    origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 
     function_association {
       event_type   = "viewer-request"

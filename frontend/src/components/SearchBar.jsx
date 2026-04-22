@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 const RECENT_TERMS = ['Pfizer', 'Goldman Sachs', 'insulin']
 
@@ -13,15 +13,25 @@ function resultTypeLabel(type) {
 export default function SearchBar({ onSearch, results, onSelect }) {
   const [q, setQ] = useState('')
 
-  const submit = (e) => {
+  useEffect(() => {
+    const term = q.trim()
+    if (term.length < 2) return
+    const handle = setTimeout(() => {
+      onSearch(term)
+    }, 300)
+    return () => clearTimeout(handle)
+  }, [q, onSearch])
+
+  const submit = async (e) => {
     e.preventDefault()
-    if (!q.trim()) return
-    onSearch(q.trim())
+    const term = q.trim()
+    if (!term) return
+    await onSearch(term)
   }
 
-  const runRecentSearch = (term) => {
+  const runRecentSearch = async (term) => {
     setQ(term)
-    onSearch(term)
+    await onSearch(term)
   }
 
   return (
