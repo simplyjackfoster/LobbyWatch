@@ -7,6 +7,7 @@ import click
 from lobbywatch.db import ensure_db, get_connection, get_db_path, get_version
 from lobbywatch.commands.update import download_and_install, DEFAULT_URL
 from lobbywatch.commands.search import search_entities
+from lobbywatch.commands.graph import get_org_graph, get_legislator_graph, get_issue_graph
 
 
 def output_json(obj: object, pretty: bool) -> None:
@@ -104,3 +105,52 @@ def search(ctx, query, entity_type):
     except Exception as e:
         error_json(str(e), pretty)
         raise SystemExit(1)
+
+
+@cli.group()
+def graph():
+    """Explore influence graphs."""
+    pass
+
+
+@graph.command("org")
+@click.argument("org_id", type=int)
+@click.option("--year-min", type=int, default=None)
+@click.option("--year-max", type=int, default=None)
+@click.option("--issue-code", default=None)
+@click.option("--node-limit", type=int, default=50)
+@click.pass_context
+def graph_org(ctx, org_id, year_min, year_max, issue_code, node_limit):
+    """Organization influence graph."""
+    pretty = ctx.obj["pretty"]
+    db = ctx.obj["db"] or str(get_db_path())
+    with get_connection(db) as conn:
+        output_json(get_org_graph(conn, org_id, year_min, year_max, issue_code, node_limit), pretty)
+
+
+@graph.command("legislator")
+@click.argument("bioguide_id")
+@click.option("--year-min", type=int, default=None)
+@click.option("--year-max", type=int, default=None)
+@click.option("--node-limit", type=int, default=50)
+@click.pass_context
+def graph_legislator(ctx, bioguide_id, year_min, year_max, node_limit):
+    """Legislator influence graph."""
+    pretty = ctx.obj["pretty"]
+    db = ctx.obj["db"] or str(get_db_path())
+    with get_connection(db) as conn:
+        output_json(get_legislator_graph(conn, bioguide_id, year_min, year_max, node_limit), pretty)
+
+
+@graph.command("issue")
+@click.argument("query")
+@click.option("--year-min", type=int, default=None)
+@click.option("--year-max", type=int, default=None)
+@click.option("--node-limit", type=int, default=50)
+@click.pass_context
+def graph_issue(ctx, query, year_min, year_max, node_limit):
+    """Issue-based influence graph."""
+    pretty = ctx.obj["pretty"]
+    db = ctx.obj["db"] or str(get_db_path())
+    with get_connection(db) as conn:
+        output_json(get_issue_graph(conn, query, year_min, year_max, node_limit), pretty)
