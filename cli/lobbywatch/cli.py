@@ -124,8 +124,12 @@ def graph_org(ctx, org_id, year_min, year_max, issue_code, node_limit):
     """Organization influence graph."""
     pretty = ctx.obj["pretty"]
     db = ctx.obj["db"] or str(get_db_path())
-    with get_connection(db) as conn:
-        output_json(get_org_graph(conn, org_id, year_min, year_max, issue_code, node_limit), pretty)
+    try:
+        with get_connection(db) as conn:
+            output_json(get_org_graph(conn, org_id, year_min, year_max, issue_code, node_limit), pretty)
+    except Exception as e:
+        error_json(str(e), pretty)
+        raise SystemExit(1)
 
 
 @graph.command("legislator")
@@ -138,8 +142,12 @@ def graph_legislator(ctx, bioguide_id, year_min, year_max, node_limit):
     """Legislator influence graph."""
     pretty = ctx.obj["pretty"]
     db = ctx.obj["db"] or str(get_db_path())
-    with get_connection(db) as conn:
-        output_json(get_legislator_graph(conn, bioguide_id, year_min, year_max, node_limit), pretty)
+    try:
+        with get_connection(db) as conn:
+            output_json(get_legislator_graph(conn, bioguide_id, year_min, year_max, node_limit), pretty)
+    except Exception as e:
+        error_json(str(e), pretty)
+        raise SystemExit(1)
 
 
 @graph.command("issue")
@@ -152,5 +160,9 @@ def graph_issue(ctx, query, year_min, year_max, node_limit):
     """Issue-based influence graph."""
     pretty = ctx.obj["pretty"]
     db = ctx.obj["db"] or str(get_db_path())
-    with get_connection(db) as conn:
-        output_json(get_issue_graph(conn, query, year_min, year_max, node_limit), pretty)
+    try:
+        with get_connection(db) as conn:
+            output_json(get_issue_graph(conn, query, year_min, year_max, node_limit), pretty)
+    except Exception as e:
+        error_json(str(e), pretty)
+        raise SystemExit(1)

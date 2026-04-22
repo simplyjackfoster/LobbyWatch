@@ -19,12 +19,14 @@ class GraphBuilder:
         self.nodes: dict = {}
         self._edge_keys: set = set()
         self.edges: list = []
+        self._truncated: bool = False
 
     def add_node(self, node_id: str, label: str, node_type: str, **attrs) -> bool:
         if node_id in self.nodes:
             self.nodes[node_id].update(attrs)
             return True
         if len(self.nodes) >= self.max_nodes:
+            self._truncated = True
             return False
         self.nodes[node_id] = {"id": node_id, "label": label, "type": node_type, **attrs}
         return True
@@ -40,7 +42,7 @@ class GraphBuilder:
         return {
             "nodes": list(self.nodes.values()),
             "edges": self.edges,
-            "truncated": len(self.nodes) >= self.max_nodes,
+            "truncated": self._truncated,
         }
 
 
@@ -60,10 +62,10 @@ def get_org_graph(conn, org_id: int, year_min=None, year_max=None,
 
     params = [org_id]
     filters = ""
-    if year_min:
+    if year_min is not None:
         filters += " AND r.filing_year >= ?"
         params.append(year_min)
-    if year_max:
+    if year_max is not None:
         filters += " AND r.filing_year <= ?"
         params.append(year_max)
     if issue_code:
@@ -136,10 +138,10 @@ def get_legislator_graph(conn, bioguide_id: str, year_min=None, year_max=None,
 
     params = [leg["id"]]
     filters = ""
-    if year_min:
+    if year_min is not None:
         filters += " AND strftime('%Y', c.contribution_date) >= ?"
         params.append(str(year_min))
-    if year_max:
+    if year_max is not None:
         filters += " AND strftime('%Y', c.contribution_date) <= ?"
         params.append(str(year_max))
     params.append(node_limit)
@@ -180,10 +182,10 @@ def get_issue_graph(conn, q: str, year_min=None, year_max=None,
 
     params = [q, f"%{q.lower()}%", q_upper]
     filters = ""
-    if year_min:
+    if year_min is not None:
         filters += " AND lr.filing_year >= ?"
         params.append(year_min)
-    if year_max:
+    if year_max is not None:
         filters += " AND lr.filing_year <= ?"
         params.append(year_max)
     params.append(node_limit * 2)
@@ -244,8 +246,8 @@ def get_issue_graph(conn, q: str, year_min=None, year_max=None,
                 f"SELECT cm.legislator_id, cm.committee_id, cm.role, "
                 f"c.name AS cname, c.committee_id AS ccode, c.chamber "
                 f"FROM committee_memberships cm JOIN committees c ON c.id = cm.committee_id "
-                f"WHERE cm.legislator_id IN ({ph2})",
-                leg_ids,
+                f"WHERE cm.legislator_id IN ({ph2}) LIMIT ?",
+                leg_ids + [node_limit * 2],
             ):
                 nid = f"com-{cm['committee_id']}"
                 g.add_node(nid, cm["cname"], "committee",
