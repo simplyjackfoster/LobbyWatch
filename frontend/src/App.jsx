@@ -7,6 +7,7 @@ import FilterBar from './components/FilterBar'
 import GraphView from './components/GraphView'
 import InfoPanel from './components/InfoPanel'
 import SearchBar from './components/SearchBar'
+import Developers from './pages/Developers'
 import MyReps from './pages/MyReps'
 
 const seedGraph = { nodes: [], edges: [] }
@@ -65,6 +66,7 @@ function readRoute() {
 function getActiveView(pathname) {
   if (pathname.startsWith('/explore')) return 'graph'
   if (pathname.startsWith('/discoveries')) return 'discoveries'
+  if (pathname.startsWith('/developers')) return 'developers'
   if (pathname.startsWith('/my-reps')) return 'my-reps'
   if (pathname.startsWith('/rep/')) return 'my-reps'
   return 'my-reps'
@@ -346,6 +348,15 @@ export default function App() {
           </div>
         </div>
         <p className="masthead-sources">Senate LDA · FEC · Congress.gov</p>
+        <div className="masthead-utility-links">
+          <button
+            type="button"
+            className={`masthead-utility-link ${activeView === 'developers' ? 'active' : ''}`}
+            onClick={() => navigate('/developers')}
+          >
+            Developers / CLI Docs
+          </button>
+        </div>
         <div className="masthead-bottom-rule" aria-hidden="true" />
       </header>
 
@@ -400,6 +411,7 @@ export default function App() {
       )}
 
       {activeView === 'discoveries' && <Discoveries onViewGraph={onDiscoveryViewGraph} />}
+      {activeView === 'developers' && <Developers />}
     </div>
   )
 }

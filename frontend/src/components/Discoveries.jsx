@@ -99,15 +99,6 @@ const COUNTRY_NAMES = {
   IN: 'India',
 }
 
-const CLI_COMMANDS = [
-  { label: 'Search', cmd: 'lobbywatch search "pharma"' },
-  { label: 'Org Graph', cmd: 'lobbywatch graph org 123 --year-min 2023 --node-limit 75' },
-  { label: 'Legislator Graph', cmd: 'lobbywatch graph legislator A000001' },
-  { label: 'Issue Graph', cmd: 'lobbywatch graph issue "drug pricing"' },
-  { label: 'Entity Summary', cmd: 'lobbywatch entity committee SSHR' },
-  { label: 'Analysis', cmd: 'lobbywatch analysis betrayal-index --issue-code HLTH' },
-]
-
 function formatCurrency(value) {
   return `$${Number(value || 0).toLocaleString()}`
 }
@@ -430,57 +421,6 @@ export default function Discoveries({ onViewGraph }) {
         })}
       </div>
 
-      <section className="dev-docs" aria-label="For developers CLI docs">
-        <div className="dev-docs-head">
-          <p className="dev-docs-kicker">FOR DEVELOPERS</p>
-          <h2>Integrate LobbyWatch via CLI</h2>
-          <p>
-            Use the local CLI for AI agents, scripts, and notebooks. It ships JSON output by default and works offline
-            after the first data install.
-          </p>
-        </div>
-
-        <div className="dev-docs-grid">
-          <article className="dev-docs-card">
-            <h3>Quickstart</h3>
-            <ol className="dev-docs-steps">
-              <li>
-                Install:
-                <pre>{`pip install lobbywatch`}</pre>
-              </li>
-              <li>
-                Pull latest snapshot:
-                <pre>{`lobbywatch update`}</pre>
-              </li>
-              <li>
-                Check version and local data:
-                <pre>{`lobbywatch status`}</pre>
-              </li>
-            </ol>
-            <p className="dev-docs-tip">Tip: add <span className="num">--pretty</span> for human-readable JSON.</p>
-          </article>
-
-          <article className="dev-docs-card">
-            <h3>Command Reference</h3>
-            <div className="dev-docs-command-list">
-              {CLI_COMMANDS.map((item) => (
-                <div key={item.label} className="dev-docs-command-item">
-                  <span>{item.label}</span>
-                  <code>{item.cmd}</code>
-                </div>
-              ))}
-            </div>
-          </article>
-
-          <article className="dev-docs-card">
-            <h3>Output Contract</h3>
-            <p>Every command returns one JSON object to stdout.</p>
-            <pre>{`{"results":[{"id":1234,"type":"organization","name":"Pfizer Inc."}]}`}</pre>
-            <p>Errors are machine-friendly and return non-zero exit codes.</p>
-            <pre>{`{"error":"No local database found. Run: lobbywatch update"}`}</pre>
-          </article>
-        </div>
-      </section>
     </section>
   )
 }

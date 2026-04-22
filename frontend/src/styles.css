@@ -169,6 +169,31 @@ select {
   color: var(--ink-muted);
 }
 
+.masthead-utility-links {
+  margin-top: 6px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.masthead-utility-link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-secondary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.masthead-utility-link:hover {
+  color: var(--ink);
+}
+
+.masthead-utility-link.active {
+  color: var(--red);
+}
+
 .masthead-bottom-rule {
   border-top: 1px solid var(--ink);
   margin-top: 10px;
@@ -943,17 +968,17 @@ select {
   border-left-color: var(--border);
 }
 
-.dev-docs {
-  margin-top: 28px;
+.developers-page {
+  padding: 12px 24px 30px;
+}
+
+.developers-hero {
   border-top: 3px solid var(--ink);
-  padding-top: 18px;
+  border-bottom: 1px solid var(--border);
+  padding: 16px 0 20px;
 }
 
-.dev-docs-head {
-  max-width: 980px;
-}
-
-.dev-docs-kicker {
+.developers-kicker {
   margin: 0;
   font-family: var(--mono);
   font-size: 11px;
@@ -961,58 +986,77 @@ select {
   color: var(--red);
 }
 
-.dev-docs-head h2 {
-  margin: 6px 0 0;
+.developers-hero h2 {
+  margin: 8px 0 0;
   font-family: var(--display);
-  font-size: 34px;
-  line-height: 1.15;
+  font-size: 42px;
+  line-height: 1.1;
   color: var(--ink);
 }
 
-.dev-docs-head p {
-  margin: 8px 0 0;
+.developers-hero p {
+  margin: 10px 0 0;
+  max-width: 920px;
+  font-size: 17px;
   color: var(--ink-secondary);
-  font-size: 16px;
 }
 
-.dev-docs-grid {
+.developers-hero pre {
+  margin: 14px 0 0;
+  width: fit-content;
+  max-width: 100%;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px solid var(--ink);
+  background: #ffffff;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.developers-grid {
   margin-top: 16px;
   display: grid;
-  grid-template-columns: 1.25fr 1fr 1fr;
+  grid-template-columns: 1.2fr 1fr 1fr;
   gap: 12px;
 }
 
-.dev-docs-card {
+.developers-card {
   border: 1px solid var(--border);
   border-left: 3px solid var(--ink);
   background: #ffffff;
   padding: 14px;
 }
 
-.dev-docs-card h3 {
+.developers-card h3 {
   margin: 0;
   font-family: var(--display);
-  font-size: 22px;
+  font-size: 24px;
   color: var(--ink);
 }
 
-.dev-docs-card p {
+.developers-card p {
   margin: 10px 0 0;
   color: var(--ink-secondary);
 }
 
-.dev-docs-steps {
+.developers-card code {
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.developers-card ol {
   margin: 10px 0 0;
   padding-left: 20px;
   display: grid;
   gap: 10px;
 }
 
-.dev-docs-steps li {
+.developers-card li {
   color: var(--ink);
 }
 
-.dev-docs-card pre {
+.developers-card pre {
   margin: 6px 0 0;
   padding: 10px;
   overflow-x: auto;
@@ -1024,37 +1068,41 @@ select {
   color: var(--ink);
 }
 
-.dev-docs-tip {
-  margin-top: 12px;
-  font-style: italic;
+.developers-reference {
+  margin-top: 16px;
 }
 
-.dev-docs-command-list {
+.developers-reference h3 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 28px;
+}
+
+.developers-command-list {
   margin-top: 10px;
   display: grid;
-  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
-.dev-docs-command-item {
+.developers-command-item {
   border: 1px solid var(--border);
-  background: var(--bg-surface);
-  padding: 8px;
+  background: #ffffff;
+  padding: 10px 12px;
 }
 
-.dev-docs-command-item span {
+.developers-command-item code {
   display: block;
-  margin-bottom: 4px;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  color: var(--ink-muted);
-  text-transform: uppercase;
-}
-
-.dev-docs-command-item code {
   font-family: var(--mono);
   font-size: 12px;
   color: var(--ink);
+  word-break: break-word;
+}
+
+.developers-command-item p {
+  margin: 6px 0 0;
+  font-size: 14px;
+  color: var(--ink-secondary);
 }
 
 .skeleton-static {
@@ -1635,7 +1683,13 @@ select {
     grid-template-columns: 1fr;
   }
 
-  .dev-docs-grid {
+  .developers-page {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .developers-grid,
+  .developers-command-list {
     grid-template-columns: 1fr;
   }
 }
@@ -1662,8 +1716,8 @@ select {
     font-size: 24px;
   }
 
-  .dev-docs-head h2 {
-    font-size: 28px;
+  .developers-hero h2 {
+    font-size: 32px;
   }
 
   .info-panel {
