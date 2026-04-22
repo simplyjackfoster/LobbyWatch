@@ -6,6 +6,7 @@ import click
 
 from lobbywatch.db import ensure_db, get_connection, get_db_path, get_version
 from lobbywatch.commands.update import download_and_install, DEFAULT_URL
+from lobbywatch.commands.search import search_entities
 
 
 def output_json(obj: object, pretty: bool) -> None:
@@ -78,6 +79,28 @@ def issue_codes(ctx):
             ).fetchall()
             codes = [r[0] for r in rows if r[0]]
         output_json({"issue_codes": codes}, pretty)
+    except Exception as e:
+        error_json(str(e), pretty)
+        raise SystemExit(1)
+
+
+@cli.command()
+@click.argument("query")
+@click.option("--type", "entity_type", default=None,
+              type=click.Choice(["org", "legislator", "issue"]),
+              help="Filter result type")
+@click.pass_context
+def search(ctx, query, entity_type):
+    """Search organizations, legislators, and issues."""
+    pretty = ctx.obj["pretty"]
+    db = ctx.obj["db"] or str(get_db_path())
+    try:
+        with get_connection(db) as conn:
+            results = search_entities(conn, query)
+        if entity_type:
+            type_map = {"org": "organization", "legislator": "legislator", "issue": "issue"}
+            results["results"] = [r for r in results["results"] if r["type"] == type_map[entity_type]]
+        output_json(results, pretty)
     except Exception as e:
         error_json(str(e), pretty)
         raise SystemExit(1)
