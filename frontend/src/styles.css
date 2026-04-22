@@ -943,6 +943,120 @@ select {
   border-left-color: var(--border);
 }
 
+.dev-docs {
+  margin-top: 28px;
+  border-top: 3px solid var(--ink);
+  padding-top: 18px;
+}
+
+.dev-docs-head {
+  max-width: 980px;
+}
+
+.dev-docs-kicker {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--red);
+}
+
+.dev-docs-head h2 {
+  margin: 6px 0 0;
+  font-family: var(--display);
+  font-size: 34px;
+  line-height: 1.15;
+  color: var(--ink);
+}
+
+.dev-docs-head p {
+  margin: 8px 0 0;
+  color: var(--ink-secondary);
+  font-size: 16px;
+}
+
+.dev-docs-grid {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: 1.25fr 1fr 1fr;
+  gap: 12px;
+}
+
+.dev-docs-card {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--ink);
+  background: #ffffff;
+  padding: 14px;
+}
+
+.dev-docs-card h3 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 22px;
+  color: var(--ink);
+}
+
+.dev-docs-card p {
+  margin: 10px 0 0;
+  color: var(--ink-secondary);
+}
+
+.dev-docs-steps {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  display: grid;
+  gap: 10px;
+}
+
+.dev-docs-steps li {
+  color: var(--ink);
+}
+
+.dev-docs-card pre {
+  margin: 6px 0 0;
+  padding: 10px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.dev-docs-tip {
+  margin-top: 12px;
+  font-style: italic;
+}
+
+.dev-docs-command-list {
+  margin-top: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.dev-docs-command-item {
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  padding: 8px;
+}
+
+.dev-docs-command-item span {
+  display: block;
+  margin-bottom: 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--ink-muted);
+  text-transform: uppercase;
+}
+
+.dev-docs-command-item code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+}
+
 .skeleton-static {
   height: 13px;
   background: var(--bg-raised);
@@ -1520,6 +1634,10 @@ select {
   .myreps-grid {
     grid-template-columns: 1fr;
   }
+
+  .dev-docs-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1542,6 +1660,10 @@ select {
 
   .discoveries-hero p {
     font-size: 24px;
+  }
+
+  .dev-docs-head h2 {
+    font-size: 28px;
   }
 
   .info-panel {
