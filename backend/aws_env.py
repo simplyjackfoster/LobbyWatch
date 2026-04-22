@@ -85,4 +85,22 @@ def bootstrap_ssm_env():
         if value:
             os.environ["CF_API_SHARED_SECRET"] = value
 
+    congress_key_param = os.getenv("CONGRESS_API_KEY_PARAM", "").strip()
+    if congress_key_param and not os.getenv("CONGRESS_API_KEY"):
+        value = _get_parameter(congress_key_param)
+        if value:
+            os.environ["CONGRESS_API_KEY"] = value
+
+    lda_key_param = os.getenv("LDA_API_KEY_PARAM", "").strip()
+    if lda_key_param and not os.getenv("LDA_API_KEY"):
+        value = _get_parameter(lda_key_param)
+        if value:
+            os.environ["LDA_API_KEY"] = value
+
+    fec_key_param = os.getenv("FEC_API_KEY_PARAM", "").strip()
+    if fec_key_param and not os.getenv("FEC_API_KEY"):
+        value = _get_parameter(fec_key_param)
+        if value:
+            os.environ["FEC_API_KEY"] = value
+
     _bootstrapped = True

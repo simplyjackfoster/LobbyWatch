@@ -258,7 +258,10 @@ resource "aws_iam_role_policy" "lambda_api_inline" {
       {
         Effect   = "Allow",
         Action   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
-        Resource = ["arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.secure_param_prefix}/*"]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.secure_param_prefix}",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.secure_param_prefix}/*",
+        ]
       }
     ]
   })
@@ -274,7 +277,10 @@ resource "aws_iam_role_policy" "lambda_worker_inline" {
       {
         Effect   = "Allow",
         Action   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
-        Resource = ["arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.secure_param_prefix}/*"]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.secure_param_prefix}",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.secure_param_prefix}/*",
+        ]
       },
       {
         Effect   = "Allow",
@@ -406,6 +412,9 @@ resource "aws_lambda_function" "worker" {
       WORKER_QUEUE_URL           = aws_sqs_queue.worker.id
       RETENTION_YEARS            = tostring(var.retention_years)
       CF_API_SHARED_SECRET_PARAM = aws_ssm_parameter.origin_verify.name
+      CONGRESS_API_KEY_PARAM     = "${local.secure_param_prefix}/congress_api_key"
+      LDA_API_KEY_PARAM          = "${local.secure_param_prefix}/lda_api_key"
+      FEC_API_KEY_PARAM          = "${local.secure_param_prefix}/fec_api_key"
     }
   }
 
