@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lobbywatch"
+version = "0.1.0"
+description = "CLI for querying LobbyWatch political influence data locally"
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.0",
+    "zstandard>=0.21",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+lobbywatch = "lobbywatch.cli:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lobbywatch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
