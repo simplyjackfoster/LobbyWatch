@@ -5,6 +5,7 @@ import os
 import click
 
 from lobbywatch.db import ensure_db, get_connection, get_db_path, get_version
+from lobbywatch.commands.update import download_and_install, DEFAULT_URL
 
 
 def output_json(obj: object, pretty: bool) -> None:
@@ -27,3 +28,56 @@ def cli(ctx, pretty, db):
     ctx.ensure_object(dict)
     ctx.obj["pretty"] = pretty
     ctx.obj["db"] = db
+
+
+@cli.command()
+@click.option("--url", default=DEFAULT_URL, help="URL to .db.zst snapshot")
+@click.pass_context
+def update(ctx, url):
+    """Download latest data snapshot from GitHub Releases."""
+    pretty = ctx.obj["pretty"]
+    db = ctx.obj["db"] or str(get_db_path())
+    try:
+        download_and_install(url, db)
+        meta = get_version(db)
+        output_json({"ok": True, "exported_at": meta.get("exported_at"), "db_path": db}, pretty)
+    except Exception as e:
+        error_json(str(e), pretty)
+        raise SystemExit(1)
+
+
+@cli.command()
+@click.pass_context
+def status(ctx):
+    """Show installed data version and file size."""
+    pretty = ctx.obj["pretty"]
+    db = ctx.obj["db"] or str(get_db_path())
+    if not os.path.exists(db):
+        error_json("No database found. Run: lobbywatch update", pretty)
+        raise SystemExit(1)
+    try:
+        meta = get_version(db)
+        size = os.path.getsize(db)
+        output_json({**meta, "db_path": db, "size_bytes": size}, pretty)
+    except Exception as e:
+        error_json(str(e), pretty)
+        raise SystemExit(1)
+
+
+@cli.command("issue-codes")
+@click.pass_context
+def issue_codes(ctx):
+    """List all issue codes in the local database."""
+    pretty = ctx.obj["pretty"]
+    db = ctx.obj["db"] or str(get_db_path())
+    try:
+        with get_connection(db) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT je.value FROM lobbying_registrations r, "
+                "json_each(r.general_issue_codes) je ORDER BY je.value"
+            ).fetchall()
+            codes = [r[0] for r in rows if r[0]]
+        output_json({"issue_codes": codes}, pretty)
+    except Exception as e:
+        error_json(str(e), pretty)
+        raise SystemExit(1)
