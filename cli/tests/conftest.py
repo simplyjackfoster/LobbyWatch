@@ -114,6 +114,8 @@ def seed(conn: sqlite3.Connection) -> None:
     conn.executemany("INSERT INTO _meta VALUES (?,?)", [
         ("exported_at", "2026-04-22T00:00:00"),
         ("schema_version", "1"),
+        ("lda_coverage_through", "2026-03-31"),
+        ("congress_coverage_through", "2026-04-24"),
     ])
     conn.executemany("INSERT INTO organizations VALUES (?,?,?,?,?)", [
         (1, "Pfizer Inc.", "pfizer inc", "registrant", "PHR"),

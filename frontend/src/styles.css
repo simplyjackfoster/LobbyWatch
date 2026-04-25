@@ -169,10 +169,27 @@ select {
   color: var(--ink-muted);
 }
 
+.masthead-sources-link {
+  margin: 2px 0 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-muted);
+  cursor: pointer;
+  text-align: left;
+}
+
+.masthead-sources-link:hover {
+  color: var(--ink);
+}
+
 .masthead-utility-links {
   margin-top: 6px;
   display: flex;
   justify-content: flex-end;
+  gap: 12px;
 }
 
 .masthead-utility-link {
@@ -606,6 +623,30 @@ select {
   color: var(--ink-secondary);
 }
 
+.info-source-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.source-badge-link {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  background: #ffffff;
+  color: var(--ink-secondary);
+  text-decoration: none;
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 2px 6px;
+}
+
+.source-badge-link:hover {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+
 .info-stat-list {
   display: grid;
   gap: 12px;
@@ -974,6 +1015,95 @@ select {
   gap: 24px;
   padding: 0;
   align-items: start;
+}
+
+.about-data-page {
+  padding: 16px 24px 24px;
+}
+
+.about-data-card {
+  border: 1px solid var(--border);
+  background: #ffffff;
+  padding: 18px;
+  max-width: 920px;
+}
+
+.about-data-card h2 {
+  margin: 0 0 10px;
+  font-family: var(--display);
+  font-size: 24px;
+  line-height: 1.2;
+}
+
+.about-data-card h2 + p {
+  margin-top: 0;
+}
+
+.about-data-card p {
+  margin: 0 0 14px;
+}
+
+.about-data-source-block {
+  border: 1px solid var(--border);
+  padding: 12px;
+  margin-bottom: 10px;
+  background: var(--bg-surface);
+}
+
+.about-data-source-block h3 {
+  margin: 0 0 6px;
+  font-family: var(--display);
+  font-size: 18px;
+}
+
+.about-data-source-block p {
+  margin-bottom: 8px;
+}
+
+.about-data-source-block a {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.about-data-source-block a:hover {
+  color: var(--ink);
+}
+
+.about-data-status-grid {
+  border: 1px solid var(--border);
+  background: var(--bg-surface);
+  margin-bottom: 12px;
+}
+
+.about-data-status-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.about-data-status-row:last-child {
+  border-bottom: 0;
+}
+
+.about-data-status-row span {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+
+.about-data-status-row strong {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.about-data-card ul {
+  margin: 0;
+  padding-left: 20px;
 }
 
 .developers-sidebar {

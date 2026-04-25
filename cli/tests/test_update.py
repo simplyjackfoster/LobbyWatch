@@ -33,7 +33,10 @@ def test_status_shows_version(db_path):
     result = CliRunner().invoke(cli, ["--db", db_path, "status"])
     assert result.exit_code == 0
     data = json.loads(result.output)
+    assert data["ok"] is True
     assert data["exported_at"] == "2026-04-22T00:00:00"
+    assert data["lda_coverage_through"] == "2026-03-31"
+    assert data["congress_coverage_through"] == "2026-04-24"
     assert "size_bytes" in data
 
 

@@ -33,6 +33,93 @@ function getNodeById(graph, id) {
   return (graph?.nodes || []).find((n) => n.id === id) || null
 }
 
+function dedupeValues(values) {
+  const seen = new Set()
+  const out = []
+  values.forEach((value) => {
+    const raw = String(value || '').trim()
+    if (!raw || seen.has(raw)) return
+    seen.add(raw)
+    out.push(raw)
+  })
+  return out
+}
+
+function buildCongressBillUrl(billId, congress) {
+  const normalized = String(billId || '')
+    .toLowerCase()
+    .replace(/\./g, '')
+    .replace(/\s+/g, '')
+    .replace(/_/g, '-')
+  const match = normalized.match(/^(hconres|hjres|hres|hr|sconres|sjres|sres|s)-?(\d+)$/)
+  if (!match || !congress) return null
+
+  const [, billType, number] = match
+  const pathByType = {
+    hr: 'house-bill',
+    hres: 'house-resolution',
+    hjres: 'house-joint-resolution',
+    hconres: 'house-concurrent-resolution',
+    s: 'senate-bill',
+    sres: 'senate-resolution',
+    sjres: 'senate-joint-resolution',
+    sconres: 'senate-concurrent-resolution',
+  }
+  const path = pathByType[billType]
+  if (!path) return null
+  return `https://www.congress.gov/bill/${congress}th-congress/${path}/${number}`
+}
+
+function buildSourceBadges(node, graph, summary) {
+  if (!node) return []
+  const badges = []
+  const edges = (graph?.edges || []).filter((edge) => edge.source === node.id || edge.target === node.id)
+  const filingUuids = dedupeValues(edges.flatMap((edge) => edge.filing_uuids || []))
+  const fecCommitteeIds = dedupeValues(edges.flatMap((edge) => edge.fec_committee_ids || []))
+
+  if (node?.bioguide_id) {
+    badges.push({
+      label: 'Congress.gov ↗',
+      url: `https://www.congress.gov/member/${encodeURIComponent(node.bioguide_id)}`,
+    })
+  }
+  if (node?.lda_id) {
+    badges.push({
+      label: 'LDA ↗',
+      url: `https://lda.gov/lobbyists/${encodeURIComponent(node.lda_id)}/`,
+    })
+  }
+  if (filingUuids[0]) {
+    badges.push({
+      label: 'LDA ↗',
+      url: `https://lda.gov/filings/${encodeURIComponent(filingUuids[0])}/`,
+    })
+  }
+  if (fecCommitteeIds[0]) {
+    badges.push({
+      label: 'FEC ↗',
+      url: `https://www.fec.gov/data/committee/${encodeURIComponent(fecCommitteeIds[0])}/`,
+    })
+  }
+
+  const vote = (summary?.recent_votes || []).find((item) => item?.bill_id && item?.congress)
+  const voteUrl = vote ? buildCongressBillUrl(vote.bill_id, vote.congress) : null
+  if (voteUrl) {
+    badges.push({
+      label: 'Congress.gov ↗',
+      url: voteUrl,
+    })
+  }
+
+  const seen = new Set()
+  return badges.filter((badge) => {
+    const key = `${badge.label}|${badge.url}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 function buildGraphDrivenPanel(node, graph, summary) {
   if (!node) return { stats: [], connections: [] }
   const allEdges = graph?.edges || []
@@ -143,7 +230,7 @@ export default function InfoPanel({ node, graph, onExpand, loadingNodeId }) {
   const typeLabel = resolveType(node)
 
   useEffect(() => {
-    if (!resolved || resolved.entityType !== 'organization') {
+    if (!resolved || (resolved.entityType !== 'organization' && resolved.entityType !== 'legislator')) {
       setSummary(null)
       return
     }
@@ -156,6 +243,7 @@ export default function InfoPanel({ node, graph, onExpand, loadingNodeId }) {
   }, [resolved])
 
   const { stats, connections } = useMemo(() => buildGraphDrivenPanel(node, graph, summary), [node, graph, summary])
+  const sourceBadges = useMemo(() => buildSourceBadges(node, graph, summary), [node, graph, summary])
   const coveredPositions = Array.isArray(node?.covered_positions) ? node.covered_positions.filter(Boolean) : []
   const hasCoveredPositions = Boolean(node?.has_covered_position && coveredPositions.length > 0)
   const hasConviction = Boolean(node?.has_conviction)
@@ -174,6 +262,21 @@ export default function InfoPanel({ node, graph, onExpand, loadingNodeId }) {
           <div className="info-panel-rule-strong" />
           <h3>{node.label}</h3>
           <p className="info-panel-type">{typeLabel}</p>
+          {sourceBadges.length > 0 && (
+            <div className="info-source-badges">
+              {sourceBadges.map((badge) => (
+                <a
+                  key={badge.url}
+                  href={badge.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="source-badge-link"
+                >
+                  {badge.label}
+                </a>
+              ))}
+            </div>
+          )}
           <hr className="rule" />
 
           {loading ? (

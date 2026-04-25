@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { fetchIssueCodes, fetchIssueGraph, fetchLegGraph, fetchOrgGraph, searchEntities } from './api'
+import { fetchDataStatus, fetchIssueCodes, fetchIssueGraph, fetchLegGraph, fetchOrgGraph, searchEntities } from './api'
 import Discoveries from './components/Discoveries'
 import ErrorBoundary from './components/ErrorBoundary'
 import FilterBar from './components/FilterBar'
 import GraphView from './components/GraphView'
 import InfoPanel from './components/InfoPanel'
 import SearchBar from './components/SearchBar'
+import AboutData from './pages/AboutData'
 import Developers from './pages/Developers'
 import MyReps from './pages/MyReps'
 
@@ -67,9 +68,21 @@ function getActiveView(pathname) {
   if (pathname.startsWith('/explore')) return 'graph'
   if (pathname.startsWith('/discoveries')) return 'discoveries'
   if (pathname.startsWith('/developers')) return 'developers'
+  if (pathname.startsWith('/about-data')) return 'about-data'
   if (pathname.startsWith('/my-reps')) return 'my-reps'
   if (pathname.startsWith('/rep/')) return 'my-reps'
   return 'my-reps'
+}
+
+function formatUpdatedAgo(timestamp) {
+  if (!timestamp) return null
+  const parsed = new Date(String(timestamp).replace('Z', ''))
+  if (Number.isNaN(parsed.getTime())) return null
+  const now = new Date()
+  const diffDays = Math.max(0, Math.floor((now.getTime() - parsed.getTime()) / (24 * 60 * 60 * 1000)))
+  if (diffDays === 0) return 'Updated today'
+  if (diffDays === 1) return 'Updated 1 day ago'
+  return `Updated ${diffDays} days ago`
 }
 
 function getSharedBioguide(pathname) {
@@ -88,6 +101,9 @@ export default function App() {
   const [issueCodes, setIssueCodes] = useState([])
   const [graphLoading, setGraphLoading] = useState(false)
   const [loadingNodeId, setLoadingNodeId] = useState(null)
+  const [dataStatus, setDataStatus] = useState(null)
+  const [dataStatusLoading, setDataStatusLoading] = useState(true)
+  const [dataStatusError, setDataStatusError] = useState(false)
   const headerRef = useRef(null)
   const navRef = useRef(null)
   const filterRef = useRef(null)
@@ -124,6 +140,27 @@ export default function App() {
     fetchIssueCodes()
       .then((data) => setIssueCodes(data.issue_codes || []))
       .catch(() => setIssueCodes([]))
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    fetchDataStatus()
+      .then((data) => {
+        if (!active) return
+        setDataStatus(data || null)
+        setDataStatusError(false)
+      })
+      .catch(() => {
+        if (!active) return
+        setDataStatus(null)
+        setDataStatusError(true)
+      })
+      .finally(() => {
+        if (active) setDataStatusLoading(false)
+      })
+    return () => {
+      active = false
+    }
   }, [])
 
   useEffect(() => {
@@ -332,6 +369,8 @@ export default function App() {
     navigate(`/explore?legislator=${encodeURIComponent(rep.bioguide_id)}`)
   }, [navigate])
 
+  const updatedLabel = useMemo(() => formatUpdatedAgo(dataStatus?.last_exported_at), [dataStatus])
+
   return (
     <div className="app-shell">
       <header className="masthead header" ref={headerRef}>
@@ -343,12 +382,27 @@ export default function App() {
         <div className="masthead-meta-row">
           <span className="masthead-divider-line">── ── ── ── ── ──</span>
           <div className="masthead-live">
-            <span className="live-dot" aria-hidden="true">●</span>
-            <span>LIVE DATA</span>
+            {(dataStatusLoading || dataStatusError || !updatedLabel) ? (
+              <>
+                <span className="live-dot" aria-hidden="true">●</span>
+                <span>LIVE DATA</span>
+              </>
+            ) : (
+              <span>{updatedLabel}</span>
+            )}
           </div>
         </div>
-        <p className="masthead-sources">Senate LDA · FEC · Congress.gov</p>
+        <button type="button" className="masthead-sources-link" onClick={() => navigate('/about-data')}>
+          Senate LDA · FEC · Congress.gov
+        </button>
         <div className="masthead-utility-links">
+          <button
+            type="button"
+            className={`masthead-utility-link ${activeView === 'about-data' ? 'active' : ''}`}
+            onClick={() => navigate('/about-data')}
+          >
+            About Data
+          </button>
           <button
             type="button"
             className={`masthead-utility-link ${activeView === 'developers' ? 'active' : ''}`}
@@ -412,6 +466,7 @@ export default function App() {
 
       {activeView === 'discoveries' && <Discoveries onViewGraph={onDiscoveryViewGraph} />}
       {activeView === 'developers' && <Developers />}
+      {activeView === 'about-data' && <AboutData />}
     </div>
   )
 }

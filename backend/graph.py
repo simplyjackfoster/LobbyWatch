@@ -10,6 +10,7 @@ from models import (
     LobbyingRegistration,
     Lobbyist,
     Organization,
+    Vote,
 )
 
 
@@ -115,6 +116,10 @@ def get_organization_graph(
           COUNT(lr.id) AS filing_count,
           COALESCE(SUM(lr.amount), 0) AS total_amount,
           COALESCE(
+            ARRAY_AGG(DISTINCT lr.filing_uuid) FILTER (WHERE lr.filing_uuid IS NOT NULL),
+            ARRAY[]::text[]
+          ) AS filing_uuids,
+          COALESCE(
             ARRAY_AGG(DISTINCT issue_code) FILTER (WHERE issue_code IS NOT NULL),
             ARRAY[]::text[]
           ) AS issue_codes
@@ -163,6 +168,7 @@ def get_organization_graph(
                 filing_count=int(row.filing_count or 0),
                 amount=total_amount,
                 amount_label=format_amount_label(total_amount),
+                filing_uuids=_normalize_issue_codes(row.filing_uuids),
                 issue_codes=_normalize_issue_codes(row.issue_codes),
             )
 
@@ -175,6 +181,9 @@ def get_organization_graph(
             Legislator.bioguide_id.label("bioguide_id"),
             func.coalesce(func.sum(Contribution.amount), 0).label("total_contributed"),
             func.count(Contribution.id).label("contribution_count"),
+            func.array_agg(func.distinct(Contribution.fec_committee_id))
+            .filter(Contribution.fec_committee_id.is_not(None))
+            .label("fec_committee_ids"),
         )
         .join(Legislator, Legislator.id == Contribution.recipient_legislator_id)
         .where(Contribution.contributor_org_id == org_id)
@@ -212,6 +221,7 @@ def get_organization_graph(
                 amount=total_contributed,
                 amount_label=format_amount_label(total_contributed),
                 contribution_count=int(row.contribution_count or 0),
+                fec_committee_ids=_normalize_issue_codes(row.fec_committee_ids),
             )
 
     if legislator_ids:
@@ -263,6 +273,9 @@ def get_legislator_graph(
             Organization,
             func.coalesce(func.sum(Contribution.amount), 0).label("total"),
             func.count(Contribution.id).label("contribution_count"),
+            func.array_agg(func.distinct(Contribution.fec_committee_id))
+            .filter(Contribution.fec_committee_id.is_not(None))
+            .label("fec_committee_ids"),
         )
         .join(Contribution, Contribution.contributor_org_id == Organization.id)
         .where(Contribution.recipient_legislator_id == legislator.id)
@@ -277,7 +290,7 @@ def get_legislator_graph(
 
     contrib_rows = db.execute(contrib_query).all()
 
-    for org, total, contribution_count in contrib_rows:
+    for org, total, contribution_count, fec_committee_ids in contrib_rows:
         org_node = f"org-{org.id}"
         if g.add_node(org_node, org.name, "organization", subtype=org.type, color=NODE_COLORS["organization"]):
             total_amount = safe_amount(total)
@@ -288,6 +301,7 @@ def get_legislator_graph(
                 amount=total_amount,
                 amount_label=format_amount_label(total_amount),
                 contribution_count=int(contribution_count or 0),
+                fec_committee_ids=_normalize_issue_codes(fec_committee_ids),
             )
 
     cm_rows = db.execute(
@@ -333,6 +347,10 @@ def get_issue_graph(
           r.name AS registrant_name,
           COUNT(lr.id) AS filing_count,
           COALESCE(SUM(lr.amount), 0) AS total_amount,
+          COALESCE(
+            ARRAY_AGG(DISTINCT lr.filing_uuid) FILTER (WHERE lr.filing_uuid IS NOT NULL),
+            ARRAY[]::text[]
+          ) AS filing_uuids,
           COALESCE(
             ARRAY_AGG(DISTINCT issue_code) FILTER (WHERE issue_code IS NOT NULL),
             ARRAY[]::text[]
@@ -387,6 +405,7 @@ def get_issue_graph(
             filing_count=int(row.filing_count or 0),
             amount=total_amount,
             amount_label=format_amount_label(total_amount),
+            filing_uuids=_normalize_issue_codes(row.filing_uuids),
             issue_codes=_normalize_issue_codes(row.issue_codes),
         )
 
@@ -401,6 +420,9 @@ def get_issue_graph(
                 Legislator.state.label("state"),
                 Legislator.bioguide_id.label("bioguide_id"),
                 func.coalesce(func.sum(Contribution.amount), 0).label("total_contributed"),
+                func.array_agg(func.distinct(Contribution.fec_committee_id))
+                .filter(Contribution.fec_committee_id.is_not(None))
+                .label("fec_committee_ids"),
             )
             .join(Legislator, Legislator.id == Contribution.recipient_legislator_id)
             .where(Contribution.contributor_org_id.in_(org_ids))
@@ -441,6 +463,7 @@ def get_issue_graph(
                 "contribution",
                 amount=total_contributed,
                 amount_label=format_amount_label(total_contributed),
+                fec_committee_ids=_normalize_issue_codes(row.fec_committee_ids),
             )
 
         if leg_ids:
@@ -587,6 +610,17 @@ def get_legislator_summary(db: Session, entity_id: str):
         ).scalar()
         or 0
     )
+    vote_rows = db.execute(
+        select(Vote.bill_id, Vote.congress, Vote.vote_date)
+        .where(Vote.legislator_id == leg.id)
+        .where(Vote.bill_id.is_not(None))
+        .order_by(Vote.vote_date.desc().nullslast(), Vote.id.desc())
+        .limit(10)
+    ).all()
+    recent_votes = [
+        {"bill_id": row.bill_id, "congress": row.congress, "vote_date": str(row.vote_date) if row.vote_date else None}
+        for row in vote_rows
+    ]
 
     committee_member_ids = db.execute(
         select(CommitteeMembership.committee_id).where(CommitteeMembership.legislator_id == leg.id)
@@ -616,6 +650,7 @@ def get_legislator_summary(db: Session, entity_id: str):
         "top_contributing_orgs": top_contributing_orgs,
         "total_contributions_received": total_contributions_received,
         "orgs_lobbying_committee_jurisdiction": orgs_lobbying_committee_jurisdiction,
+        "recent_votes": recent_votes,
     }
 
 

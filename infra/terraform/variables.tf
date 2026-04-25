@@ -93,6 +93,12 @@ variable "lambda_worker_package" {
   default     = "dist/lambda_worker.zip"
 }
 
+variable "lambda_export_package" {
+  description = "Path to export Lambda zip package"
+  type        = string
+  default     = "dist/lambda_export.zip"
+}
+
 variable "lambda_runtime" {
   description = "Lambda runtime"
   type        = string
@@ -121,6 +127,18 @@ variable "worker_timeout_seconds" {
   description = "Worker Lambda timeout"
   type        = number
   default     = 300
+}
+
+variable "export_memory_mb" {
+  description = "Export Lambda memory"
+  type        = number
+  default     = 2048
+}
+
+variable "export_timeout_seconds" {
+  description = "Export Lambda timeout"
+  type        = number
+  default     = 900
 }
 
 variable "worker_schedule_expression" {
@@ -153,6 +171,12 @@ variable "budget_alert_emails" {
   default     = []
 }
 
+variable "ops_alert_emails" {
+  description = "CloudWatch alarm email recipients"
+  type        = list(string)
+  default     = []
+}
+
 variable "ssm_secure_params" {
   description = "Secure SSM params written by Terraform"
   type        = map(string)
@@ -164,4 +188,10 @@ variable "retention_years" {
   description = "Fact-table retention years in hosted RDS"
   type        = number
   default     = 2
+}
+
+variable "github_repository" {
+  description = "GitHub repository slug used for release uploads (owner/repo)"
+  type        = string
+  default     = "jackfoster/LobbyWatch"
 }

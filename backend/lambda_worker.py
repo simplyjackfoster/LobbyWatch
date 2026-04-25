@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import time
+from datetime import date, datetime, timezone
 from typing import Any
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
@@ -19,6 +20,103 @@ logger.setLevel(logging.INFO)
 
 CONGRESS_API_BASE = "https://api.congress.gov/v3"
 LDA_API_BASE = "https://lda.gov/api/v1"
+
+
+def _ensure_pipeline_meta_table(db) -> None:
+    db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS _pipeline_meta (
+              key TEXT PRIMARY KEY,
+              value TEXT
+            )
+            """
+        )
+    )
+    db.commit()
+
+
+def _set_pipeline_meta(db, key: str, value: str | None) -> None:
+    if value is None:
+        return
+    db.execute(
+        text(
+            """
+            INSERT INTO _pipeline_meta (key, value)
+            VALUES (:key, :value)
+            ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value
+            """
+        ),
+        {"key": key, "value": str(value)},
+    )
+
+
+def _period_rank_and_date(year: int, period: str | None) -> tuple[int, date]:
+    raw = (period or "").strip().lower().replace(" ", "_")
+    mapping: dict[str, tuple[int, tuple[int, int]]] = {
+        "q1": (1, (3, 31)),
+        "first_quarter": (1, (3, 31)),
+        "quarter_1": (1, (3, 31)),
+        "q2": (2, (6, 30)),
+        "second_quarter": (2, (6, 30)),
+        "quarter_2": (2, (6, 30)),
+        "mid_year": (2, (6, 30)),
+        "h1": (2, (6, 30)),
+        "q3": (3, (9, 30)),
+        "third_quarter": (3, (9, 30)),
+        "quarter_3": (3, (9, 30)),
+        "q4": (4, (12, 31)),
+        "fourth_quarter": (4, (12, 31)),
+        "quarter_4": (4, (12, 31)),
+        "year_end": (4, (12, 31)),
+        "h2": (4, (12, 31)),
+    }
+    rank, (month, day) = mapping.get(raw, (4, (12, 31)))
+    return rank, date(year, month, day)
+
+
+def _derive_lda_coverage_through(db) -> str | None:
+    rows = db.execute(
+        text(
+            """
+            SELECT filing_year, filing_period
+            FROM lobbying_registrations
+            WHERE filing_year IS NOT NULL
+            ORDER BY filing_year DESC
+            LIMIT 200
+            """
+        )
+    ).all()
+    if not rows:
+        return None
+
+    best_score = -1
+    best_date = None
+    for row in rows:
+        year = int(row.filing_year)
+        rank, period_date = _period_rank_and_date(year, row.filing_period)
+        score = (year * 10) + rank
+        if score > best_score:
+            best_score = score
+            best_date = period_date
+    return best_date.isoformat() if best_date else None
+
+
+def _derive_congress_coverage_through(db) -> str | None:
+    vote_date = db.execute(text("SELECT MAX(vote_date)::text AS max_vote_date FROM votes")).scalar()
+    return str(vote_date) if vote_date else None
+
+
+def _publish_export_task() -> None:
+    queue_url = (os.getenv("EXPORT_QUEUE_URL") or "").strip()
+    if not queue_url:
+        logger.warning("EXPORT_QUEUE_URL is not set; skipping export task enqueue")
+        return
+    import boto3
+
+    sqs = boto3.client("sqs")
+    sqs.send_message(QueueUrl=queue_url, MessageBody=json.dumps({"task": "export_and_release"}))
 
 
 def _run_analyze() -> None:
@@ -823,6 +921,12 @@ def _run_scheduled_ingest(payload: dict[str, Any]) -> dict[str, Any]:
                 years=[int(y) for y in lda_years],
                 max_pages_per_year=lda_max_pages,
             )
+        _ensure_pipeline_meta_table(db)
+        _set_pipeline_meta(db, "last_ingest_at", datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+        _set_pipeline_meta(db, "lda_coverage_through", _derive_lda_coverage_through(db))
+        _set_pipeline_meta(db, "congress_coverage_through", _derive_congress_coverage_through(db))
+        db.commit()
+        _publish_export_task()
         return {
             "task": "scheduled_ingest",
             "status": "ok",

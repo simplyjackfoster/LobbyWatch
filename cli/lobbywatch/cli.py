@@ -62,7 +62,16 @@ def status(ctx):
     try:
         meta = get_version(db)
         size = os.path.getsize(db)
-        output_json({**meta, "db_path": db, "size_bytes": size}, pretty)
+        payload = {
+            "ok": True,
+            "exported_at": meta.get("exported_at"),
+            "db_path": db,
+            "size_bytes": size,
+        }
+        for key in ("lda_coverage_through", "congress_coverage_through"):
+            if key in meta and meta.get(key):
+                payload[key] = meta[key]
+        output_json(payload, pretty)
     except Exception as e:
         error_json(str(e), pretty)
         raise SystemExit(1)

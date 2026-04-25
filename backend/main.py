@@ -857,6 +857,27 @@ def issue_codes(db: Session = Depends(get_db)):
     return {"issue_codes": [r.code for r in rows]}
 
 
+@app.get("/meta/data-status")
+def data_status(db: Session = Depends(get_db)):
+    payload = {
+        "last_exported_at": None,
+        "last_ingest_at": None,
+        "lda_coverage_through": None,
+        "congress_coverage_through": None,
+    }
+    try:
+        rows = db.execute(text("SELECT key, value FROM _pipeline_meta")).all()
+    except Exception:
+        db.rollback()
+        return payload
+
+    for row in rows:
+        key = str(row.key or "")
+        if key in payload:
+            payload[key] = row.value
+    return payload
+
+
 @app.get("/graph/organization/{id}")
 def graph_org(
     id: int,

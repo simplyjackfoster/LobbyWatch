@@ -3,11 +3,12 @@ data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
 locals {
-  name_prefix          = "${var.project}-${var.environment}"
-  tags                 = { Project = var.project, Environment = var.environment, ManagedBy = "terraform" }
-  secure_param_prefix  = "/${var.project}/${var.environment}"
-  cloudfront_aliases   = compact(concat(var.domain_name != null ? [var.domain_name] : [], var.domain_aliases))
-  cloudfront_zone_id   = "Z2FDTNDATAQYW2"
+  name_prefix         = "${var.project}-${var.environment}"
+  tags                = { Project = var.project, Environment = var.environment, ManagedBy = "terraform" }
+  secure_param_prefix = "/${var.project}/${var.environment}"
+  cloudfront_aliases  = compact(concat(var.domain_name != null ? [var.domain_name] : [], var.domain_aliases))
+  cloudfront_zone_id  = "Z2FDTNDATAQYW2"
+  ops_alert_emails    = length(var.ops_alert_emails) > 0 ? var.ops_alert_emails : var.budget_alert_emails
 }
 
 resource "random_password" "origin_verify" {
@@ -210,7 +211,7 @@ resource "aws_iam_role" "lambda_api" {
   name = "${local.name_prefix}-lambda-api-role"
 
   assume_role_policy = jsonencode({
-    Version = "2012-10-17",
+    Version   = "2012-10-17",
     Statement = [{ Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" }, Action = "sts:AssumeRole" }]
   })
 
@@ -221,7 +222,18 @@ resource "aws_iam_role" "lambda_worker" {
   name = "${local.name_prefix}-lambda-worker-role"
 
   assume_role_policy = jsonencode({
-    Version = "2012-10-17",
+    Version   = "2012-10-17",
+    Statement = [{ Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" }, Action = "sts:AssumeRole" }]
+  })
+
+  tags = local.tags
+}
+
+resource "aws_iam_role" "lambda_export" {
+  name = "${local.name_prefix}-lambda-export-role"
+
+  assume_role_policy = jsonencode({
+    Version   = "2012-10-17",
     Statement = [{ Effect = "Allow", Principal = { Service = "lambda.amazonaws.com" }, Action = "sts:AssumeRole" }]
   })
 
@@ -248,6 +260,16 @@ resource "aws_iam_role_policy_attachment" "lambda_worker_vpc" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
 }
 
+resource "aws_iam_role_policy_attachment" "lambda_export_basic" {
+  role       = aws_iam_role.lambda_export.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
+resource "aws_iam_role_policy_attachment" "lambda_export_vpc" {
+  role       = aws_iam_role.lambda_export.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole"
+}
+
 resource "aws_iam_role_policy" "lambda_api_inline" {
   name = "${local.name_prefix}-lambda-api-inline"
   role = aws_iam_role.lambda_api.id
@@ -256,8 +278,8 @@ resource "aws_iam_role_policy" "lambda_api_inline" {
     Version = "2012-10-17",
     Statement = [
       {
-        Effect   = "Allow",
-        Action   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
+        Effect = "Allow",
+        Action = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
         Resource = [
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.secure_param_prefix}",
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.secure_param_prefix}/*",
@@ -275,8 +297,8 @@ resource "aws_iam_role_policy" "lambda_worker_inline" {
     Version = "2012-10-17",
     Statement = [
       {
-        Effect   = "Allow",
-        Action   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
+        Effect = "Allow",
+        Action = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
         Resource = [
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.secure_param_prefix}",
           "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.secure_param_prefix}/*",
@@ -285,7 +307,31 @@ resource "aws_iam_role_policy" "lambda_worker_inline" {
       {
         Effect   = "Allow",
         Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes", "sqs:SendMessage"],
-        Resource = [aws_sqs_queue.worker.arn, aws_sqs_queue.worker_dlq.arn]
+        Resource = [aws_sqs_queue.worker.arn, aws_sqs_queue.worker_dlq.arn, aws_sqs_queue.export.arn]
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "lambda_export_inline" {
+  name = "${local.name_prefix}-lambda-export-inline"
+  role = aws_iam_role.lambda_export.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.secure_param_prefix}",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.secure_param_prefix}/*",
+        ]
+      },
+      {
+        Effect   = "Allow",
+        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"],
+        Resource = [aws_sqs_queue.export.arn, aws_sqs_queue.export_dlq.arn]
       }
     ]
   })
@@ -308,13 +354,30 @@ resource "aws_sqs_queue" "worker" {
   tags = local.tags
 }
 
+resource "aws_sqs_queue" "export_dlq" {
+  name                      = "${local.name_prefix}-export-queue-dlq"
+  message_retention_seconds = 1209600
+  tags                      = local.tags
+}
+
+resource "aws_sqs_queue" "export" {
+  name = "${local.name_prefix}-export-queue"
+
+  visibility_timeout_seconds = max(60, var.export_timeout_seconds + 30)
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.export_dlq.arn
+    maxReceiveCount     = 5
+  })
+  tags = local.tags
+}
+
 resource "aws_lambda_function" "api" {
-  function_name = "${local.name_prefix}-api"
-  role          = aws_iam_role.lambda_api.arn
-  runtime       = var.lambda_runtime
-  handler       = "lambda_api.handler"
-  timeout       = var.lambda_timeout_seconds
-  memory_size   = var.lambda_memory_mb
+  function_name    = "${local.name_prefix}-api"
+  role             = aws_iam_role.lambda_api.arn
+  runtime          = var.lambda_runtime
+  handler          = "lambda_api.handler"
+  timeout          = var.lambda_timeout_seconds
+  memory_size      = var.lambda_memory_mb
   filename         = var.lambda_api_package
   source_code_hash = filebase64sha256(var.lambda_api_package)
 
@@ -377,24 +440,24 @@ resource "aws_apigatewayv2_stage" "default" {
     throttling_rate_limit  = var.api_throttle_rate_limit
   }
 
-  tags        = local.tags
+  tags = local.tags
 }
 
 resource "aws_lambda_permission" "api_gateway_invoke" {
   statement_id  = "AllowApiGatewayInvoke"
   action        = "lambda:InvokeFunction"
-  function_name           = aws_lambda_function.api.function_name
+  function_name = aws_lambda_function.api.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http_api.execution_arn}/*/*"
 }
 
 resource "aws_lambda_function" "worker" {
-  function_name = "${local.name_prefix}-worker"
-  role          = aws_iam_role.lambda_worker.arn
-  runtime       = var.lambda_runtime
-  handler       = "lambda_worker.handler"
-  timeout       = var.worker_timeout_seconds
-  memory_size   = var.worker_memory_mb
+  function_name    = "${local.name_prefix}-worker"
+  role             = aws_iam_role.lambda_worker.arn
+  runtime          = var.lambda_runtime
+  handler          = "lambda_worker.handler"
+  timeout          = var.worker_timeout_seconds
+  memory_size      = var.worker_memory_mb
   filename         = var.lambda_worker_package
   source_code_hash = filebase64sha256(var.lambda_worker_package)
 
@@ -415,6 +478,37 @@ resource "aws_lambda_function" "worker" {
       CONGRESS_API_KEY_PARAM     = "${local.secure_param_prefix}/congress_api_key"
       LDA_API_KEY_PARAM          = "${local.secure_param_prefix}/lda_api_key"
       FEC_API_KEY_PARAM          = "${local.secure_param_prefix}/fec_api_key"
+      EXPORT_QUEUE_URL           = aws_sqs_queue.export.id
+    }
+  }
+
+  tags = local.tags
+}
+
+resource "aws_lambda_function" "export" {
+  function_name    = "${local.name_prefix}-export"
+  role             = aws_iam_role.lambda_export.arn
+  runtime          = var.lambda_runtime
+  handler          = "lambda_export.handler"
+  timeout          = var.export_timeout_seconds
+  memory_size      = var.export_memory_mb
+  filename         = var.lambda_export_package
+  source_code_hash = filebase64sha256(var.lambda_export_package)
+
+  vpc_config {
+    subnet_ids         = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+    security_group_ids = [aws_security_group.lambda.id]
+  }
+
+  environment {
+    variables = {
+      LOBBYWATCH_ENV             = var.environment
+      DATABASE_URL_PARAM         = aws_ssm_parameter.database_url.name
+      SSM_PARAM_PREFIX           = local.secure_param_prefix
+      ENABLE_SSM_CONFIG          = "1"
+      GITHUB_PAT_PARAM           = "${local.secure_param_prefix}/github_pat"
+      GITHUB_REPOSITORY          = var.github_repository
+      CF_API_SHARED_SECRET_PARAM = aws_ssm_parameter.origin_verify.name
     }
   }
 
@@ -425,6 +519,12 @@ resource "aws_lambda_event_source_mapping" "worker_sqs" {
   event_source_arn = aws_sqs_queue.worker.arn
   function_name    = aws_lambda_function.worker.arn
   batch_size       = 5
+}
+
+resource "aws_lambda_event_source_mapping" "export_sqs" {
+  event_source_arn = aws_sqs_queue.export.arn
+  function_name    = aws_lambda_function.export.arn
+  batch_size       = 1
 }
 
 resource "aws_cloudwatch_event_rule" "worker_schedule" {
@@ -593,11 +693,11 @@ resource "aws_s3_bucket_policy" "site" {
     Version = "2012-10-17",
     Statement = [
       {
-        Sid = "AllowCloudFrontRead",
-        Effect = "Allow",
+        Sid       = "AllowCloudFrontRead",
+        Effect    = "Allow",
         Principal = { Service = "cloudfront.amazonaws.com" },
-        Action   = ["s3:GetObject"],
-        Resource = ["${aws_s3_bucket.site.arn}/*"],
+        Action    = ["s3:GetObject"],
+        Resource  = ["${aws_s3_bucket.site.arn}/*"],
         Condition = {
           StringEquals = {
             "AWS:SourceArn" = aws_cloudfront_distribution.main.arn
@@ -641,7 +741,40 @@ resource "aws_cloudwatch_metric_alarm" "worker_dlq_messages" {
   }
 
   alarm_description = "Worker DLQ has visible messages"
+  alarm_actions     = length(local.ops_alert_emails) > 0 ? [aws_sns_topic.ops_alerts[0].arn] : []
   tags              = local.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "export_dlq_messages" {
+  alarm_name          = "${local.name_prefix}-export-dlq-messages"
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  statistic           = "Average"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+
+  dimensions = {
+    QueueName = aws_sqs_queue.export_dlq.name
+  }
+
+  alarm_description = "Export DLQ has visible messages"
+  alarm_actions     = length(local.ops_alert_emails) > 0 ? [aws_sns_topic.ops_alerts[0].arn] : []
+  tags              = local.tags
+}
+
+resource "aws_sns_topic" "ops_alerts" {
+  count = length(local.ops_alert_emails) > 0 ? 1 : 0
+  name  = "${local.name_prefix}-ops-alerts"
+  tags  = local.tags
+}
+
+resource "aws_sns_topic_subscription" "ops_email" {
+  for_each  = length(local.ops_alert_emails) > 0 ? toset(local.ops_alert_emails) : []
+  topic_arn = aws_sns_topic.ops_alerts[0].arn
+  protocol  = "email"
+  endpoint  = each.value
 }
 
 resource "aws_cloudwatch_metric_alarm" "rds_cpu" {

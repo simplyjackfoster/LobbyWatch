@@ -31,6 +31,10 @@ output "worker_queue_url" {
   value = aws_sqs_queue.worker.id
 }
 
+output "export_queue_url" {
+  value = aws_sqs_queue.export.id
+}
+
 output "dns_instructions" {
   value = {
     apex_alias_target = aws_cloudfront_distribution.main.domain_name
@@ -41,4 +45,8 @@ output "dns_instructions" {
 
 output "ssm_prefix" {
   value = local.secure_param_prefix
+}
+
+output "github_pat_param_name" {
+  value = "${local.secure_param_prefix}/github_pat"
 }

@@ -17,6 +17,7 @@ This stack provisions AWS infrastructure for the AWS-first deployment model:
 - Lambda artifacts built at:
   - `dist/lambda_api.zip`
   - `dist/lambda_worker.zip`
+  - `dist/lambda_export.zip`
 
 Build artifacts:
 
@@ -36,7 +37,8 @@ terraform apply \
   -var="domain_name=lobby.watch" \
   -var="acm_certificate_arn=arn:aws:acm:us-east-1:...:certificate/..." \
   -var="lambda_api_package=../../dist/lambda_api.zip" \
-  -var="lambda_worker_package=../../dist/lambda_worker.zip"
+  -var="lambda_worker_package=../../dist/lambda_worker.zip" \
+  -var="lambda_export_package=../../dist/lambda_export.zip"
 ```
 
 ## Important Variables
@@ -46,6 +48,8 @@ terraform apply \
   - `true` if VPC Lambdas must call external APIs reliably (Congress/Census/Zippopotam)
 - `retention_years`: metadata used by worker/data tooling (default `2`)
 - `ssm_secure_params`: map of additional SecureString parameters (API keys, etc.)
+- `github_repository`: repo slug for release uploads (default `jackfoster/LobbyWatch`)
+- `ops_alert_emails`: recipients for DLQ alarm emails (falls back to `budget_alert_emails` when unset)
 
 ## Outputs
 

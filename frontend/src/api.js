@@ -17,6 +17,11 @@ export async function fetchIssueCodes() {
   return data
 }
 
+export async function fetchDataStatus() {
+  const { data } = await client.get('/meta/data-status')
+  return data
+}
+
 export async function fetchEntitySummary(entityType, entityId) {
   const { data } = await client.get(`/entity/${entityType}/${entityId}/summary`)
   return data
