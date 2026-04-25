@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import zstandard
+from post_export_validator import validate_export
 
 SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT);
@@ -263,8 +264,11 @@ def build_db(sq_path: str, pg, year_filter: str = "", org_ids: set | None = None
     copy_table(
         cur,
         sq,
-        "SELECT id, contributor_org_id, recipient_legislator_id, amount, "
-        "contribution_date::text, fec_committee_id, cycle FROM contributions",
+        "SELECT MIN(id), contributor_org_id, recipient_legislator_id, amount, "
+        "contribution_date::text, fec_committee_id, cycle "
+        "FROM contributions "
+        "GROUP BY contributor_org_id, recipient_legislator_id, amount, "
+        "         contribution_date, fec_committee_id, cycle",
         "contributions",
         lambda row: (row[0], row[1], row[2], to_float(row[3]), row[4], row[5], row[6]),
     )
@@ -280,7 +284,14 @@ def build_db(sq_path: str, pg, year_filter: str = "", org_ids: set | None = None
     copy_table(
         cur,
         sq,
-        "SELECT id, legislator_id, bill_id, bill_title, vote_position, "
+        "SELECT id, legislator_id, bill_id, bill_title, "
+        "CASE vote_position "
+        "  WHEN 'Aye' THEN 'Yes' "
+        "  WHEN 'Yea' THEN 'Yes' "
+        "  WHEN 'No' THEN 'No' "
+        "  WHEN 'Nay' THEN 'No' "
+        "  ELSE vote_position "
+        "END AS vote_position, "
         "vote_date::text, congress, issue_tags FROM votes",
         "votes",
         lambda row: (row[0], row[1], row[2], row[3], row[4], row[5], row[6], to_json(row[7])),
@@ -348,6 +359,7 @@ def build_and_compress(pg_conn, output_path: str, level: int = 22, year_filter: 
 
     try:
         build_db(sqlite_path, pg_conn, year_filter=year_filter, org_ids=org_ids)
+        validate_export(sqlite_path)
         raw_size_bytes = os.path.getsize(sqlite_path)
         compressed_size_bytes = compress(sqlite_path, str(out), level=level)
         return {

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import time
 from datetime import date, datetime, timezone
 from typing import Any
@@ -20,6 +21,11 @@ logger.setLevel(logging.INFO)
 
 CONGRESS_API_BASE = "https://api.congress.gov/v3"
 LDA_API_BASE = "https://lda.gov/api/v1"
+
+_LEGAL_SUFFIX_RE = re.compile(
+    r"\s+(LLC|LLP|INC|CORP|CO|LTD|PLLC|PC|PLC|LP|GP)\.?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _ensure_pipeline_meta_table(db) -> None:
@@ -241,7 +247,8 @@ def _normalize_name(value: str | None) -> str:
         if not prev_space:
             chars.append(" ")
             prev_space = True
-    return " ".join("".join(chars).split())
+    normalized = " ".join("".join(chars).split())
+    return _LEGAL_SUFFIX_RE.sub("", normalized).strip()
 
 
 def _fetch_lda_json(
@@ -687,7 +694,7 @@ def _sync_lda_enrichment(
                     {str(a.get("general_issue_code")).strip().upper() for a in activities if a.get("general_issue_code")}
                 )
                 specific_issues = " | ".join(
-                    [str(a.get("specific_issues")).strip() for a in activities if a.get("specific_issues")]
+                    [str(a.get("specific_issue")).strip() for a in activities if a.get("specific_issue")]
                 ) or None
 
                 foreign_entities = filing.get("foreign_entities") or []
@@ -710,6 +717,7 @@ def _sync_lda_enrichment(
                           filing_year,
                           filing_period,
                           amount,
+                          issue_codes,
                           general_issue_codes,
                           specific_issues,
                           has_foreign_entity,
@@ -723,6 +731,7 @@ def _sync_lda_enrichment(
                           :filing_year,
                           :filing_period,
                           :amount,
+                          :issue_codes,
                           :general_issue_codes,
                           :specific_issues,
                           :has_foreign,
@@ -736,6 +745,7 @@ def _sync_lda_enrichment(
                           filing_year = COALESCE(EXCLUDED.filing_year, lobbying_registrations.filing_year),
                           filing_period = COALESCE(EXCLUDED.filing_period, lobbying_registrations.filing_period),
                           amount = COALESCE(EXCLUDED.amount, lobbying_registrations.amount),
+                          issue_codes = COALESCE(EXCLUDED.issue_codes, lobbying_registrations.issue_codes),
                           general_issue_codes = COALESCE(EXCLUDED.general_issue_codes, lobbying_registrations.general_issue_codes),
                           specific_issues = COALESCE(EXCLUDED.specific_issues, lobbying_registrations.specific_issues),
                           has_foreign_entity = EXCLUDED.has_foreign_entity,
@@ -751,6 +761,7 @@ def _sync_lda_enrichment(
                         "filing_year": filing.get("filing_year"),
                         "filing_period": filing.get("filing_period"),
                         "amount": filing.get("income") or filing.get("expenses") or filing.get("amount") or 0,
+                        "issue_codes": general_issue_codes or None,
                         "general_issue_codes": general_issue_codes or None,
                         "specific_issues": specific_issues,
                         "has_foreign": has_foreign,
@@ -773,7 +784,9 @@ def _sync_lda_enrichment(
                     )
                     lobbyist_name = raw.get("lobbyist") or raw.get("name") or ""
                     if isinstance(lobbyist_name, dict):
-                        lobbyist_name = lobbyist_name.get("name") or ""
+                        first = (lobbyist_name.get("first_name") or "").strip()
+                        last = (lobbyist_name.get("last_name") or "").strip()
+                        lobbyist_name = f"{first} {last}".strip()
                     lobbyist_name = str(lobbyist_name).strip()
                     normalized_name = _normalize_name(lobbyist_name)
 
@@ -889,9 +902,9 @@ def _sync_lda_enrichment(
 def _run_scheduled_ingest(payload: dict[str, Any]) -> dict[str, Any]:
     congresses = payload.get("congresses") or [118, 119]
     chambers = payload.get("chambers") or ["senate", "house"]
-    sync_cosponsors = bool(payload.get("sync_cosponsors", False))
+    sync_cosponsors = bool(payload.get("sync_cosponsors", True))
     sync_lda = bool(payload.get("sync_lda", True))
-    cosponsor_member_limit = int(payload.get("cosponsor_member_limit") or 50)
+    cosponsor_member_limit = int(payload.get("cosponsor_member_limit") or 600)
     max_members = payload.get("max_members")
     max_members = int(max_members) if max_members is not None else None
     lda_years = payload.get("lda_years") or [2024, 2025]
