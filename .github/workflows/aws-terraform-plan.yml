@@ -29,10 +29,20 @@ jobs:
       - name: Build Lambda zip packages
         run: ./scripts/build_lambda_packages.sh
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC role)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Configure AWS credentials (access keys fallback)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' && secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Setup Terraform
@@ -61,4 +71,5 @@ jobs:
           TF_VAR_domain_name: ${{ vars.DOMAIN_NAME }}
           TF_VAR_lambda_api_package: ../../dist/lambda_api.zip
           TF_VAR_lambda_worker_package: ../../dist/lambda_worker.zip
+          TF_VAR_lambda_export_package: ../../dist/lambda_export.zip
         run: terraform plan -input=false

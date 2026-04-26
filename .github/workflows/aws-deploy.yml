@@ -40,6 +40,7 @@ jobs:
           path: |
             dist/lambda_api.zip
             dist/lambda_worker.zip
+            dist/lambda_export.zip
 
   infra_apply:
     if: ${{ inputs.apply_infra }}
@@ -58,10 +59,20 @@ jobs:
           name: lambda-zips
           path: dist
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC role)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Configure AWS credentials (access keys fallback)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' && secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
 
       - name: Setup Terraform
@@ -85,6 +96,7 @@ jobs:
           TF_VAR_acm_certificate_arn: ${{ secrets.ACM_CERTIFICATE_ARN }}
           TF_VAR_lambda_api_package: ../../dist/lambda_api.zip
           TF_VAR_lambda_worker_package: ../../dist/lambda_worker.zip
+          TF_VAR_lambda_export_package: ../../dist/lambda_export.zip
           TF_VAR_enable_nat_gateway: ${{ vars.ENABLE_NAT_GATEWAY || 'false' }}
           TF_VAR_budget_alert_emails: ${{ vars.BUDGET_ALERT_EMAILS_JSON || '[]' }}
           TF_VAR_monthly_budget_limit_usd: ${{ vars.MONTHLY_BUDGET_LIMIT_USD || '20' }}
@@ -120,10 +132,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC role)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Configure AWS credentials (access keys fallback)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' && secrets.AWS_ACCESS_KEY_ID != '' && secrets.AWS_SECRET_ACCESS_KEY != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
       - name: Build and deploy frontend
         env:
